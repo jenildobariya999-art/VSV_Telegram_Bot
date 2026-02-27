@@ -1,21 +1,18 @@
 import telebot
 from telebot import types
 import sqlite3
-import os
 
-# ========== Environment Variables ==========
-API_TOKEN = os.environ.get("8534393299:AAFLYuQiqImk6wWI6TLTYrR_7xKbgwZvK_8")  # Telegram Bot Token
-VSV_TOKEN = os.environ.get("TVJZCUHK")  # Your VSV API Token
+# ========== BOT TOKENS (HARD-CODED) ==========
+API_TOKEN = "8534393299:AAFLYuQiqImk6wWI6TLTYrR_7xKbgwZvK_8"  # Telegram Bot Token
+VSV_TOKEN = "TVJZCUHK"  # Your VSV Wallet Token
 ADMIN_ID = 6925391837  # Replace with your Telegram ID
-
-if not API_TOKEN or not VSV_TOKEN:
-    raise Exception("❌ API_TOKEN or VSV_TOKEN is not set in environment variables!")
 
 bot = telebot.TeleBot(API_TOKEN)
 
-# ========== Database Setup ==========
+# ========== DATABASE SETUP ==========
 conn = sqlite3.connect("database.db", check_same_thread=False)
 c = conn.cursor()
+
 c.execute("""
 CREATE TABLE IF NOT EXISTS users (
     user_id INTEGER PRIMARY KEY,
@@ -26,6 +23,7 @@ CREATE TABLE IF NOT EXISTS users (
     referred_by TEXT
 )
 """)
+
 c.execute("""
 CREATE TABLE IF NOT EXISTS withdraws (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -34,9 +32,10 @@ CREATE TABLE IF NOT EXISTS withdraws (
     status TEXT
 )
 """)
+
 conn.commit()
 
-# ========== Helper Functions ==========
+# ========== HELPER FUNCTIONS ==========
 def add_user(user_id, username, referred_by=None):
     c.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
     if not c.fetchone():
@@ -63,7 +62,7 @@ def get_referrals(ref_code):
     c.execute("SELECT user_id FROM users WHERE referred_by=?", (ref_code,))
     return c.fetchall()
 
-# ========== Start Command ==========
+# ========== START COMMAND ==========
 @bot.message_handler(commands=['start'])
 def start(message):
     user_id = message.from_user.id
@@ -72,6 +71,7 @@ def start(message):
         ref_code = message.text.split()[1]
     except IndexError:
         ref_code = None
+
     add_user(user_id, username, referred_by=ref_code)
 
     markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
@@ -84,14 +84,14 @@ def start(message):
     )
     bot.send_message(user_id, "👋 Welcome! Use the buttons below.", reply_markup=markup)
 
-# ========== Balance ==========
+# ========== BALANCE ==========
 @bot.message_handler(func=lambda message: message.text == "💰 Balance")
 def balance(message):
     user_id = message.from_user.id
     bal = get_balance(user_id)
     bot.send_message(user_id, f"💰 Your balance: ₹{bal:.2f}")
 
-# ========== Daily Bonus ==========
+# ========== DAILY BONUS ==========
 @bot.message_handler(func=lambda message: message.text == "🎁 Daily Bonus")
 def daily_bonus(message):
     user_id = message.from_user.id
@@ -99,13 +99,13 @@ def daily_bonus(message):
     claimed = c.fetchone()[0]
     if claimed == 0:
         update_balance(user_id, 10)  # daily bonus ₹10
-        c.execute("UPDATE users SET daily_claimed=1")
+        c.execute("UPDATE users SET daily_claimed=1 WHERE user_id=?", (user_id,))
         conn.commit()
         bot.send_message(user_id, "🎉 You claimed your daily bonus of ₹10!")
     else:
         bot.send_message(user_id, "⏳ You already claimed your daily bonus today!")
 
-# ========== Set Wallet ==========
+# ========== SET WALLET ==========
 @bot.message_handler(func=lambda message: message.text == "⚙️ Set Wallet")
 def wallet_prompt(message):
     bot.send_message(message.from_user.id, "Send your wallet/UPI number like this:\n/setwallet 9876543210")
@@ -119,7 +119,7 @@ def set_wallet_command(message):
     except IndexError:
         bot.send_message(message.from_user.id, "❌ Invalid format! Use /setwallet <number>")
 
-# ========== Withdraw ==========
+# ========== WITHDRAW ==========
 @bot.message_handler(func=lambda message: message.text == "💸 Withdraw")
 def withdraw(message):
     user_id = message.from_user.id
@@ -134,15 +134,15 @@ def withdraw_command(message):
         if amount > bal:
             bot.send_message(message.from_user.id, "❌ You don't have enough balance.")
             return
-        # Insert into withdraw table
-        c.execute("INSERT INTO withdraws (user_id, amount, status) VALUES (?, ?, ?)", (message.from_user.id, amount, "Pending"))
+        c.execute("INSERT INTO withdraws (user_id, amount, status) VALUES (?, ?, ?)",
+                  (message.from_user.id, amount, "Pending"))
         update_balance(message.from_user.id, -amount)
         conn.commit()
         bot.send_message(message.from_user.id, f"✅ Withdraw request for ₹{amount} sent!")
     except Exception as e:
         bot.send_message(message.from_user.id, "❌ Invalid format! Use /withdraw <amount>")
 
-# ========== Referral ==========
+# ========== REFERRAL ==========
 @bot.message_handler(func=lambda message: message.text == "👥 Refer & Earn")
 def refer_earn(message):
     user_id = message.from_user.id
@@ -155,7 +155,7 @@ def refer_earn(message):
           f"Total referrals: {len(referrals)}"
     bot.send_message(user_id, msg)
 
-# ========== Admin Panel ==========
+# ========== ADMIN PANEL ==========
 @bot.message_handler(commands=['adminpanel'])
 def admin_panel(message):
     if message.from_user.id != ADMIN_ID:
@@ -193,5 +193,5 @@ def callback_admin(call):
             msg += f"ID:{r[0]} | User:{r[1]} | Amount:₹{r[2]}\n"
         bot.send_message(ADMIN_ID, msg)
 
-# ========== Run Bot ==========
+# ========== RUN BOT ==========
 bot.infinity_polling()
