@@ -3,7 +3,15 @@ import telebot
 from telebot import types
 from datetime import datetime
 import sqlite3
-from config import API_TOKEN, VSV_TOKEN
+import requests
+import os
+
+# -------------------- Load environment variables --------------------
+API_TOKEN = os.environ.get("8534393299:AAFLYuQiqImk6wWI6TLTYrR_7xKbgwZvK_8")
+VSV_TOKEN = os.environ.get("TVJZCUHK")
+
+if not API_TOKEN or not VSV_TOKEN:
+    raise Exception("❌ API_TOKEN or VSV_TOKEN is not set in environment variables!")
 
 bot = telebot.TeleBot(API_TOKEN)
 
@@ -92,7 +100,7 @@ def start(message):
         reply_markup=keyboard
     )
 
-# -------------------- Listen to button presses --------------------
+# -------------------- Handle button presses --------------------
 @bot.message_handler(func=lambda message: True)
 def handle_buttons(message):
     user_id = message.from_user.id
@@ -115,7 +123,7 @@ def handle_buttons(message):
 
     elif text == "💸 Withdraw":
         if not user[6]:
-            bot.send_message(user_id, "❌ Please set your UPI/Wallet first using the 💳 Set Wallet button.")
+            bot.send_message(user_id, "❌ Please set your UPI/Wallet first using 💳 Set Wallet button.")
         else:
             amount = user[2]
             if amount <= 0:
