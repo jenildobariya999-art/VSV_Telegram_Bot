@@ -3,7 +3,7 @@ from telebot import types
 
 # ----------------- CONFIG -----------------
 API_TOKEN = "8534393299:AAFLYuQiqImk6wWI6TLTYrR_7xKbgwZvK_8"
-bot = telebot.TeleBot(API_TOKEN, parse_mode="MarkdownV2")
+bot = telebot.TeleBot(API_TOKEN, parse_mode="Markdown")
 
 # Example in-memory users database
 users = {}
@@ -25,11 +25,12 @@ def start(message):
             "bonus_claimed": False
         }
 
-    bot.send_message(user_id, "*🏡 Welcome To UPI Giveaway Bot!*", reply_markup=main_start_buttons())
+    # ✅ Only welcome message
+    bot.send_message(user_id, "*🏡 Welcome To UPI Giveaway Bot!*")
 
 
 # ----------------- MAIN BUTTONS -----------------
-def main_start_buttons():
+def main_buttons():
     markup = types.InlineKeyboardMarkup()
     markup.row(
         types.InlineKeyboardButton("💰 Balance", callback_data="balance"),
@@ -124,6 +125,7 @@ def payout_markup():
     )
     markup.row(types.InlineKeyboardButton("⬅ Back", callback_data="start"))
     return markup
+
 
 # ----------------- RUN BOT -----------------
 bot.infinity_polling()
