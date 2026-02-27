@@ -20,7 +20,8 @@ def start(message):
     btn2 = types.KeyboardButton("🎁 Daily Bonus")
     btn3 = types.KeyboardButton("💸 Withdraw")
     btn4 = types.KeyboardButton("👥 Refer & Earn")
-    keyboard.add(btn1, btn2, btn3, btn4)
+    btn5 = types.KeyboardButton("💳 Set Wallet")
+keyboard.add (btn1, btn2, btn3, btn4, btn5)
 
     bot.send_message(
         user_id,
@@ -85,5 +86,8 @@ def set_wallet(message):
         bot.send_message(user_id, f"✅ Your wallet/UPI is set: {wallet_number}")
     except:
         bot.send_message(user_id, "❌ Usage: /setwallet <number>")
+
+      elif text == "💳 Set Wallet":
+    bot.send_message(user_id, "Send your wallet/UPI number like this:\n/setwallet 9876543210")
 
 bot.polling()
