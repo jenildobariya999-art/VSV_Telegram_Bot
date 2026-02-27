@@ -1,265 +1,197 @@
-# bot.py
 import telebot
 from telebot import types
-from datetime import datetime
 import sqlite3
-import requests
+import os
 
-# -------------------- Tokens --------------------
-API_TOKEN = "8534393299:AAFLYuQiqImk6wWI6TLTYrR_7xKbgwZvK_8"
-VSV_TOKEN = "TVJZCUHK"
-ADMIN_ID = 6925391837  # <-- Replace with your Telegram ID
+# ========== Environment Variables ==========
+API_TOKEN = os.environ.get("8534393299:AAFLYuQiqImk6wWI6TLTYrR_7xKbgwZvK_8")  # Telegram Bot Token
+VSV_TOKEN = os.environ.get("TVJZCUHK")  # Your VSV API Token
+ADMIN_ID = 6925391837  # Replace with your Telegram ID
+
+if not API_TOKEN or not VSV_TOKEN:
+    raise Exception("❌ API_TOKEN or VSV_TOKEN is not set in environment variables!")
 
 bot = telebot.TeleBot(API_TOKEN)
 
-# -------------------- Database functions --------------------
-def init_db():
-    conn = sqlite3.connect("database.db")
-    c = conn.cursor()
-    c.execute("""CREATE TABLE IF NOT EXISTS users (
-                    user_id INTEGER PRIMARY KEY,
-                    username TEXT,
-                    balance REAL DEFAULT 0,
-                    referral_code TEXT,
-                    referred_by TEXT,
-                    last_daily_bonus TEXT,
-                    wallet TEXT
-                )""")
-    c.execute("""CREATE TABLE IF NOT EXISTS settings (
-                    key TEXT PRIMARY KEY,
-                    value REAL
-                )""")
-    # Set default settings
-    c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES (?,?)", ("daily_bonus", 10))
-    c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES (?,?)", ("min_withdraw", 50))
-    conn.commit()
-    conn.close()
+# ========== Database Setup ==========
+conn = sqlite3.connect("database.db", check_same_thread=False)
+c = conn.cursor()
+c.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY,
+    username TEXT,
+    wallet TEXT,
+    balance REAL DEFAULT 0,
+    daily_claimed INTEGER DEFAULT 0,
+    referred_by TEXT
+)
+""")
+c.execute("""
+CREATE TABLE IF NOT EXISTS withdraws (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    amount REAL,
+    status TEXT
+)
+""")
+conn.commit()
 
-def add_user(user_id, username):
-    conn = sqlite3.connect("database.db")
-    c = conn.cursor()
-    c.execute("INSERT OR IGNORE INTO users(user_id, username) VALUES (?, ?)", (user_id, username))
-    conn.commit()
-    conn.close()
-
-def get_user(user_id):
-    conn = sqlite3.connect("database.db")
-    c = conn.cursor()
+# ========== Helper Functions ==========
+def add_user(user_id, username, referred_by=None):
     c.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
-    user = c.fetchone()
-    conn.close()
-    return user
+    if not c.fetchone():
+        c.execute(
+            "INSERT INTO users (user_id, username, referred_by) VALUES (?, ?, ?)",
+            (user_id, username, referred_by)
+        )
+        conn.commit()
 
-def update_balance(user_id, new_balance):
-    conn = sqlite3.connect("database.db")
-    c = conn.cursor()
-    c.execute("UPDATE users SET balance=? WHERE user_id=?", (new_balance, user_id))
+def set_wallet(user_id, wallet):
+    c.execute("UPDATE users SET wallet=? WHERE user_id=?", (wallet, user_id))
     conn.commit()
-    conn.close()
 
-def update_daily_bonus_date(user_id, date_str):
-    conn = sqlite3.connect("database.db")
-    c = conn.cursor()
-    c.execute("UPDATE users SET last_daily_bonus=? WHERE user_id=?", (date_str, user_id))
+def update_balance(user_id, amount):
+    c.execute("UPDATE users SET balance=balance+? WHERE user_id=?", (amount, user_id))
     conn.commit()
-    conn.close()
 
-def set_wallet(user_id, wallet_number):
-    conn = sqlite3.connect("database.db")
-    c = conn.cursor()
-    c.execute("UPDATE users SET wallet=? WHERE user_id=?", (wallet_number, user_id))
-    conn.commit()
-    conn.close()
+def get_balance(user_id):
+    c.execute("SELECT balance FROM users WHERE user_id=?", (user_id,))
+    res = c.fetchone()
+    return res[0] if res else 0
 
-def get_setting(key):
-    conn = sqlite3.connect("database.db")
-    c = conn.cursor()
-    c.execute("SELECT value FROM settings WHERE key=?", (key,))
-    result = c.fetchone()
-    conn.close()
-    return result[0] if result else None
+def get_referrals(ref_code):
+    c.execute("SELECT user_id FROM users WHERE referred_by=?", (ref_code,))
+    return c.fetchall()
 
-def set_setting(key, value):
-    conn = sqlite3.connect("database.db")
-    c = conn.cursor()
-    c.execute("UPDATE settings SET value=? WHERE key=?", (value, key))
-    conn.commit()
-    conn.close()
-
-# -------------------- VSV Payment function --------------------
-def vsv_transfer(paytm_number, amount, comment):
-    url = f"https://vsv-gateway-solutions.co.in/Api/api.php?token={VSV_TOKEN}&paytm={paytm_number}&amount={amount}&comment={comment}"
-    try:
-        response = requests.get(url)
-        return response.json()
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-# -------------------- Initialize DB --------------------
-init_db()
-
-# -------------------- Start command --------------------
+# ========== Start Command ==========
 @bot.message_handler(commands=['start'])
 def start(message):
     user_id = message.from_user.id
     username = message.from_user.username or "User"
-    add_user(user_id, username)
+    try:
+        ref_code = message.text.split()[1]
+    except IndexError:
+        ref_code = None
+    add_user(user_id, username, referred_by=ref_code)
 
-    keyboard = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
-    btn1 = types.KeyboardButton("💰 Balance")
-    btn2 = types.KeyboardButton("🎁 Daily Bonus")
-    btn3 = types.KeyboardButton("💸 Withdraw")
-    btn4 = types.KeyboardButton("👥 Refer & Earn")
-    btn5 = types.KeyboardButton("💳 Set Wallet")
-    keyboard.add(btn1, btn2, btn3, btn4, btn5)
-
-    bot.send_message(
-        user_id,
-        f"👋 Hello {username}!\nWelcome to the VSV Payment Bot.",
-        reply_markup=keyboard
+    markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+    markup.add(
+        types.KeyboardButton("💰 Balance"),
+        types.KeyboardButton("🎁 Daily Bonus"),
+        types.KeyboardButton("💸 Withdraw"),
+        types.KeyboardButton("👥 Refer & Earn"),
+        types.KeyboardButton("⚙️ Set Wallet")
     )
+    bot.send_message(user_id, "👋 Welcome! Use the buttons below.", reply_markup=markup)
 
-# -------------------- Handle button presses --------------------
-@bot.message_handler(func=lambda message: not message.text.startswith("/"))
-def handle_buttons(message):
+# ========== Balance ==========
+@bot.message_handler(func=lambda message: message.text == "💰 Balance")
+def balance(message):
     user_id = message.from_user.id
-    text = message.text
-    user = get_user(user_id)
+    bal = get_balance(user_id)
+    bot.send_message(user_id, f"💰 Your balance: ₹{bal:.2f}")
 
-    if text == "💰 Balance":
-        balance = user[2] if user else 0
-        bot.send_message(user_id, f"💰 Your balance is: {balance}")
-
-    elif text == "🎁 Daily Bonus":
-        today = str(datetime.now().date())
-        bonus_amount = get_setting("daily_bonus")
-        if user[5] != today:
-            new_balance = user[2] + bonus_amount
-            update_balance(user_id, new_balance)
-            update_daily_bonus_date(user_id, today)
-            bot.send_message(user_id, f"🎁 Daily bonus added! Your new balance: {new_balance}")
-        else:
-            bot.send_message(user_id, "❌ You already claimed your daily bonus today!")
-
-    elif text == "💸 Withdraw":
-        min_withdraw = get_setting("min_withdraw")
-        if not user[6]:
-            bot.send_message(user_id, "❌ Please set your UPI/Wallet first using 💳 Set Wallet button.")
-        else:
-            amount = user[2]
-            if amount < min_withdraw:
-                bot.send_message(user_id, f"❌ Minimum withdrawal is {min_withdraw}")
-            else:
-                result = vsv_transfer(user[6], amount, "Withdraw")
-                if result.get("status") == "success":
-                    update_balance(user_id, 0)
-                    bot.send_message(user_id, f"✅ Withdrawal successful! {amount} sent to your wallet.")
-                else:
-                    bot.send_message(user_id, f"❌ Withdrawal failed: {result.get('message')}")
-
-    elif text == "👥 Refer & Earn":
-        referral_code = f"REF{user_id}"
-        bot.send_message(user_id, f"👥 Your referral code is: {referral_code}")
-
-    elif text == "💳 Set Wallet":
-        bot.send_message(user_id, "Send your wallet/UPI number like this:\n/setwallet 9876543210")
-
+# ========== Daily Bonus ==========
+@bot.message_handler(func=lambda message: message.text == "🎁 Daily Bonus")
+def daily_bonus(message):
+    user_id = message.from_user.id
+    c.execute("SELECT daily_claimed FROM users WHERE user_id=?", (user_id,))
+    claimed = c.fetchone()[0]
+    if claimed == 0:
+        update_balance(user_id, 10)  # daily bonus ₹10
+        c.execute("UPDATE users SET daily_claimed=1")
+        conn.commit()
+        bot.send_message(user_id, "🎉 You claimed your daily bonus of ₹10!")
     else:
-        bot.send_message(user_id, "Please use the buttons below.")
+        bot.send_message(user_id, "⏳ You already claimed your daily bonus today!")
 
-# -------------------- Set Wallet Command --------------------
+# ========== Set Wallet ==========
+@bot.message_handler(func=lambda message: message.text == "⚙️ Set Wallet")
+def wallet_prompt(message):
+    bot.send_message(message.from_user.id, "Send your wallet/UPI number like this:\n/setwallet 9876543210")
+
 @bot.message_handler(commands=['setwallet'])
 def set_wallet_command(message):
-    user_id = message.from_user.id
     try:
-        wallet_number = message.text.split()[1]
-        set_wallet(user_id, wallet_number)
-        bot.send_message(user_id, f"✅ Your wallet/UPI is set: {wallet_number}")
-    except:
-        bot.send_message(user_id, "❌ Usage: /setwallet <number>")
+        wallet = message.text.split()[1]
+        set_wallet(message.from_user.id, wallet)
+        bot.send_message(message.from_user.id, f"✅ Wallet set to {wallet}")
+    except IndexError:
+        bot.send_message(message.from_user.id, "❌ Invalid format! Use /setwallet <number>")
 
-# -------------------- Admin Panel --------------------
+# ========== Withdraw ==========
+@bot.message_handler(func=lambda message: message.text == "💸 Withdraw")
+def withdraw(message):
+    user_id = message.from_user.id
+    bal = get_balance(user_id)
+    bot.send_message(user_id, f"💰 Your balance: ₹{bal}\nSend amount to withdraw like this:\n/withdraw 50")
+
+@bot.message_handler(commands=['withdraw'])
+def withdraw_command(message):
+    try:
+        amount = float(message.text.split()[1])
+        bal = get_balance(message.from_user.id)
+        if amount > bal:
+            bot.send_message(message.from_user.id, "❌ You don't have enough balance.")
+            return
+        # Insert into withdraw table
+        c.execute("INSERT INTO withdraws (user_id, amount, status) VALUES (?, ?, ?)", (message.from_user.id, amount, "Pending"))
+        update_balance(message.from_user.id, -amount)
+        conn.commit()
+        bot.send_message(message.from_user.id, f"✅ Withdraw request for ₹{amount} sent!")
+    except Exception as e:
+        bot.send_message(message.from_user.id, "❌ Invalid format! Use /withdraw <amount>")
+
+# ========== Referral ==========
+@bot.message_handler(func=lambda message: message.text == "👥 Refer & Earn")
+def refer_earn(message):
+    user_id = message.from_user.id
+    referral_code = f"REF{user_id}"
+    referrals = get_referrals(referral_code)
+    bot_link = f"https://t.me/YOUR_BOT_USERNAME?start={referral_code}"  # replace with your bot username
+
+    msg = f"👥 Invite your friends and earn bonuses!\n\n" \
+          f"Your referral link:\n{bot_link}\n\n" \
+          f"Total referrals: {len(referrals)}"
+    bot.send_message(user_id, msg)
+
+# ========== Admin Panel ==========
 @bot.message_handler(commands=['adminpanel'])
 def admin_panel(message):
     if message.from_user.id != ADMIN_ID:
-        bot.send_message(message.from_user.id, "❌ You are not authorized!")
+        bot.send_message(message.from_user.id, "❌ You are not admin!")
         return
-
-    keyboard = types.InlineKeyboardMarkup(row_width=2)
-    btn1 = types.InlineKeyboardButton("💰 Change User Balance", callback_data="change_balance")
-    btn2 = types.InlineKeyboardButton("🎁 Change Daily Bonus", callback_data="change_bonus")
-    btn3 = types.InlineKeyboardButton("💸 Change Min Withdraw", callback_data="change_min_withdraw")
-    btn4 = types.InlineKeyboardButton("📢 Broadcast Message", callback_data="broadcast")
-    keyboard.add(btn1, btn2, btn3, btn4)
-    bot.send_message(ADMIN_ID, "⚙️ Admin Panel", reply_markup=keyboard)
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("💰 Edit User Balance", callback_data="edit_balance"),
+        types.InlineKeyboardButton("⚙️ Edit User Wallet", callback_data="edit_wallet"),
+        types.InlineKeyboardButton("🎁 Daily Bonus Control", callback_data="daily_bonus_control"),
+        types.InlineKeyboardButton("💸 Withdraw Requests", callback_data="withdraw_requests"),
+        types.InlineKeyboardButton("👥 Referral Dashboard", callback_data="ref_dashboard")
+    )
+    bot.send_message(ADMIN_ID, "🛠 Admin Panel", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: True)
-def handle_admin_buttons(call):
+def callback_admin(call):
     if call.from_user.id != ADMIN_ID:
-        bot.answer_callback_query(call.id, "❌ Unauthorized")
         return
 
-    if call.data == "change_balance":
-        bot.send_message(ADMIN_ID, "Send message in this format:\n/setbalance <user_id> <amount>")
+    if call.data == "ref_dashboard":
+        c.execute("SELECT user_id, username FROM users")
+        data = c.fetchall()
+        msg = "👥 Referral Dashboard:\n"
+        for d in data:
+            referrals = get_referrals(f"REF{d[0]}")
+            msg += f"{d[1]} ({d[0]}): {len(referrals)} referrals\n"
+        bot.send_message(ADMIN_ID, msg)
 
-    elif call.data == "change_bonus":
-        bot.send_message(ADMIN_ID, "Send message in this format:\n/setbonus <amount>")
+    elif call.data == "withdraw_requests":
+        c.execute("SELECT id, user_id, amount, status FROM withdraws WHERE status='Pending'")
+        rows = c.fetchall()
+        msg = "💸 Pending Withdraw Requests:\n"
+        for r in rows:
+            msg += f"ID:{r[0]} | User:{r[1]} | Amount:₹{r[2]}\n"
+        bot.send_message(ADMIN_ID, msg)
 
-    elif call.data == "change_min_withdraw":
-        bot.send_message(ADMIN_ID, "Send message in this format:\n/setminwithdraw <amount>")
-
-    elif call.data == "broadcast":
-        bot.send_message(ADMIN_ID, "Send message in this format:\n/broadcast <your message>")
-
-# -------------------- Admin Commands --------------------
-@bot.message_handler(commands=['setbalance'])
-def admin_set_balance(message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    try:
-        parts = message.text.split()
-        user_id = int(parts[1])
-        amount = float(parts[2])
-        update_balance(user_id, amount)
-        bot.send_message(ADMIN_ID, f"✅ Balance for {user_id} set to {amount}")
-    except:
-        bot.send_message(ADMIN_ID, "❌ Usage: /setbalance <user_id> <amount>")
-
-@bot.message_handler(commands=['setbonus'])
-def admin_set_bonus(message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    try:
-        amount = float(message.text.split()[1])
-        set_setting("daily_bonus", amount)
-        bot.send_message(ADMIN_ID, f"✅ Daily bonus set to {amount}")
-    except:
-        bot.send_message(ADMIN_ID, "❌ Usage: /setbonus <amount>")
-
-@bot.message_handler(commands=['setminwithdraw'])
-def admin_set_min_withdraw(message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    try:
-        amount = float(message.text.split()[1])
-        set_setting("min_withdraw", amount)
-        bot.send_message(ADMIN_ID, f"✅ Minimum withdrawal set to {amount}")
-    except:
-        bot.send_message(ADMIN_ID, "❌ Usage: /setminwithdraw <amount>")
-
-@bot.message_handler(commands=['broadcast'])
-def admin_broadcast(message):
-    if message.from_user.id != ADMIN_ID:
-        return
-    broadcast_msg = message.text.replace("/broadcast", "").strip()
-    conn = sqlite3.connect("database.db")
-    c = conn.cursor()
-    c.execute("SELECT user_id FROM users")
-    users = c.fetchall()
-    for u in users:
-        bot.send_message(u[0], broadcast_msg)
-    conn.close()
-    bot.send_message(ADMIN_ID, "✅ Broadcast sent to all users")
-
-# -------------------- Run Bot --------------------
-bot.polling()
+# ========== Run Bot ==========
+bot.infinity_polling()
