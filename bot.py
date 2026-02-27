@@ -97,7 +97,8 @@ def start(message):
     )
 
 # -------------------- Handle button presses --------------------
-@bot.message_handler(func=lambda message: True)
+# Only catch messages that are NOT commands
+@bot.message_handler(func=lambda message: not message.text.startswith("/"))
 def handle_buttons(message):
     user_id = message.from_user.id
     text = message.text
