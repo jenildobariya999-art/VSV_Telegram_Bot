@@ -4,14 +4,10 @@ from telebot import types
 from datetime import datetime
 import sqlite3
 import requests
-import os
 
-# -------------------- Load environment variables --------------------
-API_TOKEN = os.environ.get("8534393299:AAFLYuQiqImk6wWI6TLTYrR_7xKbgwZvK_8")
-VSV_TOKEN = os.environ.get("TVJZCUHK")
-
-if not API_TOKEN or not VSV_TOKEN:
-    raise Exception("❌ API_TOKEN or VSV_TOKEN is not set in environment variables!")
+# -------------------- Tokens --------------------
+API_TOKEN = "8534393299:AAFLYuQiqImk6wWI6TLTYrR_7xKbgwZvK_8"
+VSV_TOKEN = "TVJZCUHK"
 
 bot = telebot.TeleBot(API_TOKEN)
 
