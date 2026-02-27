@@ -25,9 +25,12 @@ def start(message):
             "bonus_claimed": False
         }
 
-    # ✅ Only welcome message
-    bot.send_message(user_id, "*🏡 Welcome To UPI Giveaway Bot!*")
-
+    # ✅ Send welcome + main buttons
+    bot.send_message(
+        user_id, 
+        "*🏡 Welcome To UPI Giveaway Bot!*",
+        reply_markup=main_buttons()
+    )
 
 # ----------------- MAIN BUTTONS -----------------
 def main_buttons():
@@ -44,7 +47,6 @@ def main_buttons():
         types.InlineKeyboardButton("💳 Payout Method", callback_data="payout")
     )
     return markup
-
 
 # ----------------- CALLBACK HANDLER -----------------
 @bot.callback_query_handler(func=lambda call: True)
@@ -81,7 +83,6 @@ def callback_handler(call):
             f"*Your Current UPI - {user['upi']}*"
         )
         bot.edit_message_text(text, user_id, call.message.message_id, reply_markup=payout_markup())
-
 
 # ----------------- BUTTON MARKUPS -----------------
 def balance_markup():
@@ -125,7 +126,6 @@ def payout_markup():
     )
     markup.row(types.InlineKeyboardButton("⬅ Back", callback_data="start"))
     return markup
-
 
 # ----------------- RUN BOT -----------------
 bot.infinity_polling()
