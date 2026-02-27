@@ -4,15 +4,15 @@ import sqlite3
 import random
 import string
 
-# ========== BOT TOKENS (HARD-CODED) ==========
-API_TOKEN = "8534393299:AAFLYuQiqImk6wWI6TLTYrR_7xKbgwZvK_8"  # Telegram Bot Token
-VSV_TOKEN = "TVJZCUHK"  # Your VSV Wallet Token
-ADMIN_IDS = [6925391837]  # Admin Telegram IDs
+# ======== BOT TOKENS ========
+API_TOKEN = "8534393299:AAFLYuQiqImk6wWI6TLTYrR_7xKbgwZvK_8"
+VSV_TOKEN = "TVJZCUHK"
+ADMIN_IDS = [6925391837]
 BOT_USERNAME = "Testing0011_ibot"
 
 bot = telebot.TeleBot(API_TOKEN)
 
-# ========== DATABASE SETUP ==========
+# ======== DATABASE ========
 conn = sqlite3.connect("database.db", check_same_thread=False)
 c = conn.cursor()
 
@@ -50,17 +50,13 @@ CREATE TABLE IF NOT EXISTS giftcodes (
     claimed INTEGER DEFAULT 0
 )
 """)
-
 conn.commit()
 
-# ========== HELPERS ==========
+# ======== HELPERS ========
 def add_user(user_id, username, referred_by=None):
     c.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
     if not c.fetchone():
-        c.execute(
-            "INSERT INTO users (user_id, username, referred_by) VALUES (?, ?, ?)",
-            (user_id, username, referred_by)
-        )
+        c.execute("INSERT INTO users (user_id, username, referred_by) VALUES (?, ?, ?)", (user_id, username, referred_by))
         conn.commit()
 
 def set_wallet(user_id, wallet=None, upi=None, email=None):
@@ -85,7 +81,7 @@ def get_referrals(ref_code):
 def generate_gift_code(length=8):
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
 
-# ========== USER INTERACTIONS ==========
+# ======== START / USER INTERFACE ========
 @bot.message_handler(commands=['start'])
 def start(message):
     user_id = message.from_user.id
@@ -96,76 +92,99 @@ def start(message):
         ref_code = None
 
     add_user(user_id, username, referred_by=ref_code)
+    send_main_menu(user_id)
 
-    markup = types.ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
+def send_main_menu(user_id):
+    c.execute("SELECT balance, wallet, upi, email FROM users WHERE user_id=?", (user_id,))
+    data = c.fetchone()
+    bal = data[0]
+    wallet = data[1] or "not set"
+    upi = data[2] or "not set"
+    email = data[3] or "not set"
+
+    msg = f"""💰 Balance: ₹{bal:.2f}
+
+Use 'Withdraw' button to withdraw your balance to upi
+
+Refer and earn
+💰 Per Refer Rs.4 Upi Cash
+
+👤Your Refferal Link: https://t.me/{BOT_USERNAME}?start={user_id}
+
+Share With Your Friend's & Family And Earn Refer Bonus Easily ✨🤑
+
+Bonus & Gift Code
+✨ Choose One:
+"""
+    markup = types.InlineKeyboardMarkup(row_width=2)
     markup.add(
-        types.KeyboardButton("💰 Balance"),
-        types.KeyboardButton("🎁 Daily Bonus"),
-        types.KeyboardButton("💸 Withdraw"),
-        types.KeyboardButton("👥 Refer & Earn"),
-        types.KeyboardButton("⚙️ Set Wallet"),
-        types.KeyboardButton("🎁 Gift Code")
+        types.InlineKeyboardButton("🎁 Bonus", callback_data="daily_bonus"),
+        types.InlineKeyboardButton("🎁 Gift Code", callback_data="gift_code")
     )
-    bot.send_message(user_id, "👋 Welcome! Use the buttons below.", reply_markup=markup)
-
-# ========== BALANCE ==========
-@bot.message_handler(func=lambda message: message.text == "💰 Balance")
-def balance(message):
-    user_id = message.from_user.id
-    bal = get_balance(user_id)
-    c.execute("SELECT wallet, upi, email FROM users WHERE user_id=?", (user_id,))
-    wallet, upi, email = c.fetchone()
-    msg = f"💰 Balance: ₹{bal:.2f}\n\nYour payout info:\nWallet: {wallet or 'not set'}\nUPI: {upi or 'not set'}\nEmail: {email or 'not set'}"
-    bot.send_message(user_id, msg)
-
-# ========== DAILY BONUS ==========
-@bot.message_handler(func=lambda message: message.text == "🎁 Daily Bonus")
-def daily_bonus(message):
-    user_id = message.from_user.id
-    c.execute("SELECT daily_claimed FROM users WHERE user_id=?", (user_id,))
-    claimed = c.fetchone()[0]
-    if claimed == 0:
-        update_balance(user_id, 10)  # daily bonus ₹10
-        c.execute("UPDATE users SET daily_claimed=1 WHERE user_id=?", (user_id,))
-        conn.commit()
-        bot.send_message(user_id, "🎉 You claimed your daily bonus of ₹10!")
-    else:
-        bot.send_message(user_id, "⏳ You already claimed your daily bonus today!")
-
-# ========== SET WALLET ==========
-@bot.message_handler(func=lambda message: message.text == "⚙️ Set Wallet")
-def wallet_prompt(message):
-    bot.send_message(message.from_user.id, "Send wallet/UPI/email like this:\n/setwallet wallet_number upi_number email")
-
-@bot.message_handler(commands=['setwallet'])
-def set_wallet_command(message):
-    try:
-        parts = message.text.split()
-        wallet = parts[1] if len(parts) > 1 else None
-        upi = parts[2] if len(parts) > 2 else None
-        email = parts[3] if len(parts) > 3 else None
-        set_wallet(message.from_user.id, wallet, upi, email)
-        bot.send_message(message.from_user.id, f"✅ Wallet/UPI/Email set successfully!")
-    except:
-        bot.send_message(message.from_user.id, "❌ Invalid format! Use /setwallet <wallet> <upi> <email>")
-
-# ========== WITHDRAW ==========
-@bot.message_handler(func=lambda message: message.text == "💸 Withdraw")
-def withdraw(message):
-    user_id = message.from_user.id
-    bal = get_balance(user_id)
-    markup = types.InlineKeyboardMarkup()
-    markup.add(
+    msg += "\n✨ Choose Withdrawal Method:"
+    markup2 = types.InlineKeyboardMarkup(row_width=2)
+    markup2.add(
         types.InlineKeyboardButton("UPI", callback_data="withdraw_upi"),
         types.InlineKeyboardButton("VSV", callback_data="withdraw_vsv")
     )
-    bot.send_message(user_id, f"💰 Balance: ₹{bal:.2f}\nChoose withdrawal method:", reply_markup=markup)
+    payout_msg = f"""
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("withdraw"))
-def withdraw_method(call):
-    method = call.data.split("_")[1]
-    bot.send_message(call.from_user.id, f"Send amount to withdraw via {method.upper()}:\n/withdraw_amount {method} <amount>")
+Choose Desired Payment Method From Below 👇
 
+Payout method
+Your Current Wallet - {wallet}
+Your Current UPI - {upi}
+Your Current Email - {email}
+"""
+    bot.send_message(user_id, msg, reply_markup=markup)
+    bot.send_message(user_id, "Choose Withdrawal Method:", reply_markup=markup2)
+    bot.send_message(user_id, payout_msg)
+
+# ======== CALLBACK HANDLERS ========
+@bot.callback_query_handler(func=lambda call: True)
+def callback_handler(call):
+    user_id = call.from_user.id
+
+    # ===== DAILY BONUS =====
+    if call.data == "daily_bonus":
+        c.execute("SELECT daily_claimed FROM users WHERE user_id=?", (user_id,))
+        claimed = c.fetchone()[0]
+        if claimed == 0:
+            update_balance(user_id, 10)
+            c.execute("UPDATE users SET daily_claimed=1 WHERE user_id=?", (user_id,))
+            conn.commit()
+            bot.answer_callback_query(call.id, "🎉 You claimed your daily bonus of ₹10!")
+        else:
+            bot.answer_callback_query(call.id, "⏳ You already claimed your daily bonus today!")
+
+    # ===== GIFT CODE =====
+    elif call.data == "gift_code":
+        c.execute("SELECT code, amount FROM giftcodes WHERE user_id=? AND claimed=0", (user_id,))
+        codes = c.fetchall()
+        if not codes:
+            bot.answer_callback_query(call.id, "🎁 You have no gift codes available.")
+            return
+        total = 0
+        for code, amount in codes:
+            total += amount
+            c.execute("UPDATE giftcodes SET claimed=1 WHERE code=?", (code,))
+        update_balance(user_id, total)
+        conn.commit()
+        bot.answer_callback_query(call.id, f"🎉 Gift codes redeemed! Total ₹{total} added to balance.")
+
+    # ===== WITHDRAW =====
+    elif call.data.startswith("withdraw"):
+        method = call.data.split("_")[1]
+        bot.send_message(user_id, f"Send amount to withdraw via {method.upper()}:\n/withdraw_amount {method} <amount>")
+
+    # ===== ADMIN PANEL =====
+    elif call.data.startswith("admin"):
+        if user_id not in ADMIN_IDS:
+            bot.answer_callback_query(call.id, "❌ You are not admin!")
+            return
+        bot.answer_callback_query(call.id, "Admin panel clicked! (Inline buttons coming soon)")
+
+# ======== WITHDRAW COMMAND ========
 @bot.message_handler(commands=['withdraw_amount'])
 def withdraw_amount(message):
     try:
@@ -184,34 +203,20 @@ def withdraw_amount(message):
     except:
         bot.send_message(message.from_user.id, "❌ Format: /withdraw_amount <method> <amount>")
 
-# ========== REFERRAL ==========
-@bot.message_handler(func=lambda message: message.text == "👥 Refer & Earn")
-def refer_earn(message):
-    user_id = message.from_user.id
-    referral_code = f"REF{user_id}"
-    referrals = get_referrals(referral_code)
-    bot_link = f"https://t.me/{BOT_USERNAME}?start={referral_code}"
-    msg = f"👥 Invite friends & earn!\n\nYour referral link:\n{bot_link}\nTotal referrals: {len(referrals)}\n💰 Per Refer: Rs.4 UPI Cash"
-    bot.send_message(user_id, msg)
+# ======== SET WALLET COMMAND ========
+@bot.message_handler(commands=['setwallet'])
+def set_wallet_command(message):
+    try:
+        parts = message.text.split()
+        wallet = parts[1] if len(parts) > 1 else None
+        upi = parts[2] if len(parts) > 2 else None
+        email = parts[3] if len(parts) > 3 else None
+        set_wallet(message.from_user.id, wallet, upi, email)
+        bot.send_message(message.from_user.id, f"✅ Wallet/UPI/Email set successfully!")
+    except:
+        bot.send_message(message.from_user.id, "❌ Invalid format! Use /setwallet <wallet> <upi> <email>")
 
-# ========== GIFT CODES ==========
-@bot.message_handler(func=lambda message: message.text == "🎁 Gift Code")
-def gift_code_claim(message):
-    user_id = message.from_user.id
-    c.execute("SELECT code, amount FROM giftcodes WHERE user_id=? AND claimed=0", (user_id,))
-    codes = c.fetchall()
-    if not codes:
-        bot.send_message(user_id, "🎁 You have no gift codes available.")
-        return
-    total = 0
-    for code, amount in codes:
-        total += amount
-        c.execute("UPDATE giftcodes SET claimed=1 WHERE code=?", (code,))
-    update_balance(user_id, total)
-    conn.commit()
-    bot.send_message(user_id, f"🎉 Gift codes redeemed! Total ₹{total} added to balance.")
-
-# ========== ADMIN PANEL ==========
+# ======== ADMIN PANEL COMMAND ========
 @bot.message_handler(commands=['adminpanel'])
 def admin_panel(message):
     if message.from_user.id not in ADMIN_IDS:
@@ -228,5 +233,5 @@ def admin_panel(message):
     )
     bot.send_message(message.from_user.id, "🛠 Admin Panel", reply_markup=markup)
 
-# ========== RUN BOT ==========
+# ======== RUN BOT ========
 bot.infinity_polling()
