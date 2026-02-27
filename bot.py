@@ -8,6 +8,7 @@ import requests
 # -------------------- Tokens --------------------
 API_TOKEN = "8534393299:AAFLYuQiqImk6wWI6TLTYrR_7xKbgwZvK_8"
 VSV_TOKEN = "TVJZCUHK"
+ADMIN_ID = 6925391837  # <-- Replace with your Telegram ID
 
 bot = telebot.TeleBot(API_TOKEN)
 
@@ -24,6 +25,13 @@ def init_db():
                     last_daily_bonus TEXT,
                     wallet TEXT
                 )""")
+    c.execute("""CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    value REAL
+                )""")
+    # Set default settings
+    c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES (?,?)", ("daily_bonus", 10))
+    c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES (?,?)", ("min_withdraw", 50))
     conn.commit()
     conn.close()
 
@@ -63,6 +71,21 @@ def set_wallet(user_id, wallet_number):
     conn.commit()
     conn.close()
 
+def get_setting(key):
+    conn = sqlite3.connect("database.db")
+    c = conn.cursor()
+    c.execute("SELECT value FROM settings WHERE key=?", (key,))
+    result = c.fetchone()
+    conn.close()
+    return result[0] if result else None
+
+def set_setting(key, value):
+    conn = sqlite3.connect("database.db")
+    c = conn.cursor()
+    c.execute("UPDATE settings SET value=? WHERE key=?", (value, key))
+    conn.commit()
+    conn.close()
+
 # -------------------- VSV Payment function --------------------
 def vsv_transfer(paytm_number, amount, comment):
     url = f"https://vsv-gateway-solutions.co.in/Api/api.php?token={VSV_TOKEN}&paytm={paytm_number}&amount={amount}&comment={comment}"
@@ -97,7 +120,6 @@ def start(message):
     )
 
 # -------------------- Handle button presses --------------------
-# Only catch messages that are NOT commands
 @bot.message_handler(func=lambda message: not message.text.startswith("/"))
 def handle_buttons(message):
     user_id = message.from_user.id
@@ -110,8 +132,9 @@ def handle_buttons(message):
 
     elif text == "🎁 Daily Bonus":
         today = str(datetime.now().date())
+        bonus_amount = get_setting("daily_bonus")
         if user[5] != today:
-            new_balance = user[2] + 10  # daily bonus
+            new_balance = user[2] + bonus_amount
             update_balance(user_id, new_balance)
             update_daily_bonus_date(user_id, today)
             bot.send_message(user_id, f"🎁 Daily bonus added! Your new balance: {new_balance}")
@@ -119,12 +142,13 @@ def handle_buttons(message):
             bot.send_message(user_id, "❌ You already claimed your daily bonus today!")
 
     elif text == "💸 Withdraw":
+        min_withdraw = get_setting("min_withdraw")
         if not user[6]:
             bot.send_message(user_id, "❌ Please set your UPI/Wallet first using 💳 Set Wallet button.")
         else:
             amount = user[2]
-            if amount <= 0:
-                bot.send_message(user_id, "❌ You have no balance to withdraw!")
+            if amount < min_withdraw:
+                bot.send_message(user_id, f"❌ Minimum withdrawal is {min_withdraw}")
             else:
                 result = vsv_transfer(user[6], amount, "Withdraw")
                 if result.get("status") == "success":
@@ -143,7 +167,7 @@ def handle_buttons(message):
     else:
         bot.send_message(user_id, "Please use the buttons below.")
 
-# -------------------- Command to set wallet --------------------
+# -------------------- Set Wallet Command --------------------
 @bot.message_handler(commands=['setwallet'])
 def set_wallet_command(message):
     user_id = message.from_user.id
@@ -154,5 +178,88 @@ def set_wallet_command(message):
     except:
         bot.send_message(user_id, "❌ Usage: /setwallet <number>")
 
-# -------------------- Run the bot --------------------
+# -------------------- Admin Panel --------------------
+@bot.message_handler(commands=['adminpanel'])
+def admin_panel(message):
+    if message.from_user.id != ADMIN_ID:
+        bot.send_message(message.from_user.id, "❌ You are not authorized!")
+        return
+
+    keyboard = types.InlineKeyboardMarkup(row_width=2)
+    btn1 = types.InlineKeyboardButton("💰 Change User Balance", callback_data="change_balance")
+    btn2 = types.InlineKeyboardButton("🎁 Change Daily Bonus", callback_data="change_bonus")
+    btn3 = types.InlineKeyboardButton("💸 Change Min Withdraw", callback_data="change_min_withdraw")
+    btn4 = types.InlineKeyboardButton("📢 Broadcast Message", callback_data="broadcast")
+    keyboard.add(btn1, btn2, btn3, btn4)
+    bot.send_message(ADMIN_ID, "⚙️ Admin Panel", reply_markup=keyboard)
+
+@bot.callback_query_handler(func=lambda call: True)
+def handle_admin_buttons(call):
+    if call.from_user.id != ADMIN_ID:
+        bot.answer_callback_query(call.id, "❌ Unauthorized")
+        return
+
+    if call.data == "change_balance":
+        bot.send_message(ADMIN_ID, "Send message in this format:\n/setbalance <user_id> <amount>")
+
+    elif call.data == "change_bonus":
+        bot.send_message(ADMIN_ID, "Send message in this format:\n/setbonus <amount>")
+
+    elif call.data == "change_min_withdraw":
+        bot.send_message(ADMIN_ID, "Send message in this format:\n/setminwithdraw <amount>")
+
+    elif call.data == "broadcast":
+        bot.send_message(ADMIN_ID, "Send message in this format:\n/broadcast <your message>")
+
+# -------------------- Admin Commands --------------------
+@bot.message_handler(commands=['setbalance'])
+def admin_set_balance(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    try:
+        parts = message.text.split()
+        user_id = int(parts[1])
+        amount = float(parts[2])
+        update_balance(user_id, amount)
+        bot.send_message(ADMIN_ID, f"✅ Balance for {user_id} set to {amount}")
+    except:
+        bot.send_message(ADMIN_ID, "❌ Usage: /setbalance <user_id> <amount>")
+
+@bot.message_handler(commands=['setbonus'])
+def admin_set_bonus(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    try:
+        amount = float(message.text.split()[1])
+        set_setting("daily_bonus", amount)
+        bot.send_message(ADMIN_ID, f"✅ Daily bonus set to {amount}")
+    except:
+        bot.send_message(ADMIN_ID, "❌ Usage: /setbonus <amount>")
+
+@bot.message_handler(commands=['setminwithdraw'])
+def admin_set_min_withdraw(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    try:
+        amount = float(message.text.split()[1])
+        set_setting("min_withdraw", amount)
+        bot.send_message(ADMIN_ID, f"✅ Minimum withdrawal set to {amount}")
+    except:
+        bot.send_message(ADMIN_ID, "❌ Usage: /setminwithdraw <amount>")
+
+@bot.message_handler(commands=['broadcast'])
+def admin_broadcast(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    broadcast_msg = message.text.replace("/broadcast", "").strip()
+    conn = sqlite3.connect("database.db")
+    c = conn.cursor()
+    c.execute("SELECT user_id FROM users")
+    users = c.fetchall()
+    for u in users:
+        bot.send_message(u[0], broadcast_msg)
+    conn.close()
+    bot.send_message(ADMIN_ID, "✅ Broadcast sent to all users")
+
+# -------------------- Run Bot --------------------
 bot.polling()
