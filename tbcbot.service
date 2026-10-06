@@ -1,0 +1,13 @@
+[Unit]
+Description=TBC bot (Python)
+After=network-online.target
+
+[Service]
+WorkingDirectory=/opt/tbcbot
+ExecStart=/opt/tbcbot/venv/bin/python tbc_runtime.py
+Restart=always
+RestartSec=3
+User=root
+
+[Install]
+WantedBy=multi-user.target
