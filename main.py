@@ -1,5 +1,4 @@
 import os
-import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import time
@@ -48,7 +47,6 @@ for item in EXPORT.get("commands", []):
         bot.register_message_handler(
             make_handler(name),
             commands=[name],
-            pass_bot=True,
             func=lambda m: True
         )
     except Exception:
