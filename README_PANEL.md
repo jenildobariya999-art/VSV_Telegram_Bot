@@ -16,19 +16,19 @@ Panel = apna chhota TBC. Ek hi process mein 100-200+ bots chalte hain, web dashb
     sudo apt install -y python3 python3-venv
     python3 -m venv venv && ./venv/bin/pip install -r requirements.txt
     cp .env.example .env && nano .env                    # PANEL_PASSWORD badlo (lamba!)
-    ./venv/bin/python tbc_panel.py                       # test; browser: http://SERVER_IP:8000
+    ./venv/bin/python tbc_panel.py                       # test; browser: http://SERVER_IP:2222
     sudo cp tbcpanel.service /etc/systemd/system/ && sudo systemctl daemon-reload
     sudo systemctl enable --now tbcpanel                 # 24/7
     journalctl -u tbcpanel -f                            # live logs
-Termux: `pip install flask requests waitress`, same .env, `python tbc_panel.py`, phone browser mein http://localhost:8000
+Termux: `pip install flask requests waitress`, same .env, `python tbc_panel.py`, phone browser mein http://localhost:2222
 
 ## HTTPS (zaroori hai agar internet par khola)
 Panel se code chalta hai (editor = server par code execution), isliye:
 1. Lamba password rakho. 2. HTTPS lagao. Sabse aasan Caddy:
        sudo apt install -y caddy
-       echo 'panel.yourdomain.com { reverse_proxy localhost:8000 }' | sudo tee /etc/caddy/Caddyfile && sudo systemctl restart caddy
+       echo 'panel.yourdomain.com { reverse_proxy localhost:2222 }' | sudo tee /etc/caddy/Caddyfile && sudo systemctl restart caddy
    (domain ka A record VPS IP par). Phir .env mein PUBLIC_URL=https://panel.yourdomain.com
-3. Firewall: sudo ufw allow 22,80,443/tcp && sudo ufw enable   (8000 band; Caddy se hi access)
+3. Firewall: sudo ufw allow 22,80,443/tcp && sudo ufw enable   (2222 band; Caddy se hi access)
 
 ## 220 bots shift karne ka tareeka
 1. TBC par har bot Stop karo (ek token par ek hi jagah chal sakta hai).

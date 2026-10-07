@@ -3,10 +3,13 @@
 TBC-Lite panel: run MANY Telebot-Creator (TPY) bots on your own server with a web dashboard.
   python tbc_panel.py        (needs PANEL_PASSWORD in .env or environment)
 """
-import os, sys, json, time, threading, types, secrets, hmac, re, sqlite3, traceback, io, shutil
-import requests
-from flask import Flask, request, redirect, session, render_template, abort, Response, url_for, flash
-from jinja2 import DictLoader
+import os, sys, json, time, threading, types, secrets, hmac, re, sqlite3, traceback, io, shutil, tempfile
+try:
+    import requests
+    from flask import Flask, request, redirect, session, render_template, abort, Response, url_for, flash
+    from jinja2 import DictLoader
+except ImportError as _e:
+    sys.exit("Missing Python package (%s). Run:  pip install -r requirements.txt   (or: pip install flask requests waitress)" % _e)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 def _load_env():
@@ -18,14 +21,32 @@ def _load_env():
                 k, v = line.split("=", 1); os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
 _load_env()
 
-PASSWORD = os.environ.get("PANEL_PASSWORD", "")
 HOST = os.environ.get("PANEL_HOST", "0.0.0.0")
-PORT = int(os.environ.get("PANEL_PORT", "8000"))
+PORT = int(os.environ.get("PANEL_PORT") or os.environ.get("SERVER_PORT") or os.environ.get("PORT") or "2222")
 PUBLIC_URL = os.environ.get("PUBLIC_URL", "").rstrip("/")
-DATA_DIR = os.path.abspath(os.environ.get("DATA_DIR", os.path.join(HERE, "data")))
 WORKERS_PER_BOT = int(os.environ.get("WORKERS_PER_BOT", "4"))
+
+def _pick_data_dir():
+    want = os.path.abspath(os.environ.get("DATA_DIR", os.path.join(HERE, "data")))
+    for d in (want, os.path.join(tempfile.gettempdir(), "tbc_panel_data")):
+        try:
+            os.makedirs(os.path.join(d, "bots"), exist_ok=True)
+            t = os.path.join(d, ".w"); open(t, "w").write("x"); os.remove(t)
+            if d != want: print("WARNING: %s is not writable, using %s (data may be lost on restart!)" % (want, d), flush=True)
+            return d
+        except Exception: continue
+    sys.exit("Cannot write to any data folder. Set DATA_DIR to a writable path.")
+DATA_DIR = _pick_data_dir()
 BOTS_DIR = os.path.join(DATA_DIR, "bots")
-os.makedirs(BOTS_DIR, exist_ok=True)
+
+PASSWORD = os.environ.get("PANEL_PASSWORD", "")
+_PWFILE = os.path.join(DATA_DIR, "panel_password.txt")
+PW_GENERATED = False
+if len(PASSWORD) < 8:                      # never crash: make a strong password and show it in the logs
+    if os.path.exists(_PWFILE): PASSWORD = open(_PWFILE).read().strip()
+    else:
+        PASSWORD = secrets.token_urlsafe(12); open(_PWFILE, "w").write(PASSWORD)
+    PW_GENERATED = True
 RUNTIME_PATH = os.path.join(HERE, "tbc_runtime.py")
 RUNTIME_CODE = compile(open(RUNTIME_PATH, encoding="utf-8").read(), RUNTIME_PATH, "exec")
 
@@ -539,10 +560,14 @@ def autostart():
         time.sleep(0.15)
 
 def main():
-    if len(PASSWORD) < 8:
-        sys.exit("Set PANEL_PASSWORD (min 8 characters) in .env first.")
     threading.Thread(target=autostart, daemon=True).start()
-    print("Panel on http://%s:%d" % (HOST, PORT), flush=True)
+    print("=" * 60, flush=True)
+    print("TBC-Lite panel starting on %s:%d" % (HOST, PORT), flush=True)
+    if PW_GENERATED:
+        print("PANEL_PASSWORD was not set -> generated password:  %s" % PASSWORD, flush=True)
+        print("(saved in %s ; set PANEL_PASSWORD to choose your own)" % _PWFILE, flush=True)
+    print("Open:  http://<your-server-ip>:%d   (health check: /health)" % PORT, flush=True)
+    print("=" * 60, flush=True)
     try:
         from waitress import serve
         serve(app, host=HOST, port=PORT, threads=16)
