@@ -24,6 +24,13 @@ TBC's stored data (balances, users, admins, settings) lives on TBC. This runner 
 database (bot_data.sqlite3). The first person to /start becomes owner/admin, like a fresh bot.
 To keep old users/balances you must export them from TBC (Bot.getAllData / getBotUsersFile) and import them.
 
+## Naya/updated command code TBC se lagana (commands.txt)
+Agar TBC mein code change kiya hai, to us bot ke commands export karke is folder mein `commands.txt` naam se rakh do
+(format: har command `=== /name ===` ke baad uska code). Runner start hote hi `commands.txt` ko `commands.json`
+se pehle load karta hai (log mein "loaded N commands from commands.txt" dikhega). Bot restart karna padega:
+    sudo systemctl restart tbcbot        (VPS)      |      tmux mein Ctrl+C phir python tbc_runtime.py (Termux)
+Database (bot_data.sqlite3) alag file hai, wo delete/overwrite nahi hota.
+
 ## What differs from TBC
 - libs.tbcads (TBC ads): not available -> always "no ad". Ad-gated steps will not show ads.
 - Payment/verification webhooks (libs.Webhook): set PUBLIC_URL to a public https URL that forwards

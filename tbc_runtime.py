@@ -10,7 +10,13 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import requests
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+CFG = globals().get("CONFIG") or {}          # panel mode: injected per bot
+HERE = CFG.get("dir") or os.path.dirname(os.path.abspath(globals().get("__file__", "x")))
+TAG = CFG.get("tag", "bot")
+import collections
+LOGBUF = collections.deque(maxlen=400)       # recent log lines (shown in the panel)
+STATS = {"commands": 0, "updates": 0, "errors": 0, "hours": {}, "started": time.time()}
+STOP = threading.Event()
 
 def load_env():
     p = os.path.join(HERE, ".env")
@@ -20,20 +26,24 @@ def load_env():
             if line and not line.startswith("#") and "=" in line:
                 k, v = line.split("=", 1)
                 os.environ.setdefault(k.strip(), v.strip().strip('"').strip("'"))
-load_env()
+if not CFG:
+    load_env()
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
-PUBLIC_URL = os.environ.get("PUBLIC_URL", "").rstrip("/")   # e.g. https://yourdomain.com
+BOT_TOKEN = (CFG.get("token") or os.environ.get("BOT_TOKEN", "")).strip()
+PUBLIC_URL = (CFG.get("public_url") or os.environ.get("PUBLIC_URL", "")).rstrip("/")   # e.g. https://yourdomain.com
 WEBHOOK_PORT = int(os.environ.get("WEBHOOK_PORT", "8080"))
-DB_PATH = os.environ.get("DB_PATH", os.path.join(HERE, "bot_data.sqlite3"))
-WORKERS = int(os.environ.get("WORKERS", "16"))
+DB_PATH = CFG.get("db_path") or os.environ.get("DB_PATH", os.path.join(HERE, "bot_data.sqlite3"))
+WORKERS = int(CFG.get("workers") or os.environ.get("WORKERS", "16"))
 # Outbound calls containing any of these strings are blocked (see README: author's hard-coded reporting)
 BLOCKED_OUTBOUND = [s for s in os.environ.get(
     "BLOCKED_OUTBOUND", "8327459100:,chat_id=6925391837").split(",") if s]
 API = "https://api.telegram.org/bot%s/" % BOT_TOKEN
 
 def log(*a):
-    print(time.strftime("%Y-%m-%d %H:%M:%S"), *a, flush=True)
+    line = time.strftime("%Y-%m-%d %H:%M:%S") + " " + " ".join(str(x) for x in a)
+    LOGBUF.append(line)
+    if CFG.get("print_logs", True):
+        print("[%s]" % TAG, line, flush=True)
 
 # ---------------------------------------------------------------- helpers
 class Bunch(dict):
@@ -85,8 +95,9 @@ def jsondumps(o, **k):
     return json.dumps(o, default=str, **k)
 
 # ---------------------------------------------------------------- storage
-_db = sqlite3.connect(DB_PATH, check_same_thread=False, isolation_level=None)
+_db = sqlite3.connect(DB_PATH, check_same_thread=False, isolation_level=None, timeout=30)
 _db.execute("PRAGMA journal_mode=WAL")
+_db.execute("PRAGMA synchronous=NORMAL")
 _dblock = threading.RLock()
 for stmt in [
     "CREATE TABLE IF NOT EXISTS bot_data(name TEXT PRIMARY KEY, value TEXT)",
@@ -159,36 +170,88 @@ CURRENT_USER = threading.local()
 def cur_user(): return getattr(CURRENT_USER, "u", "")
 
 # ---------------------------------------------------------------- Telegram API
-SESSION = requests.Session()
+from requests.adapters import HTTPAdapter
+def _make_session():
+    ss = requests.Session()
+    ad = HTTPAdapter(pool_connections=20, pool_maxsize=100)
+    ss.mount("https://", ad); ss.mount("http://", ad)
+    return ss
+SESSION = _make_session()
+HTTP_SESSION = _make_session()
 class TelegramError(Exception):
     pass
 
-def tg(method, **params):
+HTML_DEFAULT_METHODS = {"sendMessage", "editMessageText", "editMessageCaption", "sendPhoto", "sendVideo",
+    "sendDocument", "sendAudio", "sendAnimation", "sendVoice", "copyMessage"}
+
+def _strip_custom(v):
+    """remove premium/custom-emoji + button style fields that some bots are not allowed to use"""
+    if isinstance(v, dict):
+        return {k: _strip_custom(x) for k, x in v.items() if k not in ("icon_custom_emoji_id", "style")}
+    if isinstance(v, list):
+        return [_strip_custom(x) for x in v]
+    return v
+
+_TGEMOJI = re.compile(r"<tg-emoji[^>]*>(.*?)</tg-emoji>", re.S)
+_TAGS = re.compile(r"</?[a-zA-Z][^>]*>")
+
+def _prepare(params):
     data = {}
-    files = None
     for k, v in params.items():
         if v is None: continue
         if hasattr(v, "to_dict"): v = v.to_dict()
-        if isinstance(v, (dict, list)):
-            v = json.dumps(v, ensure_ascii=False)
-        elif isinstance(v, bool):
-            v = "true" if v else "false"
         data[k] = v
-    if "parse_mode" in data and isinstance(data["parse_mode"], str):
+    if data.get("parse_mode") is None and ("text" in data or "caption" in data):
+        pass
+    return data
+
+def _encode(data):
+    out = {}
+    for k, v in data.items():
+        if isinstance(v, (dict, list)): v = json.dumps(v, ensure_ascii=False)
+        elif isinstance(v, bool): v = "true" if v else "false"
+        out[k] = v
+    return out
+
+def tg(method, **params):
+    data = _prepare(params)
+    if method in HTML_DEFAULT_METHODS and ("text" in data or "caption" in data) and "parse_mode" not in data \
+            and "entities" not in data and "caption_entities" not in data:
+        data["parse_mode"] = "HTML"      # TBC sends HTML by default
+    if isinstance(data.get("parse_mode"), str):
         pm = data["parse_mode"].lower()
         data["parse_mode"] = {"html": "HTML", "markdown": "Markdown", "markdownv2": "MarkdownV2"}.get(pm, data["parse_mode"])
-    for attempt in range(3):
+    stage = 0
+    for attempt in range(6):
         try:
-            r = SESSION.post(API + method, data=data, timeout=70)
+            r = SESSION.post(API + method, data=_encode(data), timeout=70)
             j = r.json()
         except Exception as e:
-            if attempt == 2: raise TelegramError(str(e))
+            if attempt >= 2: raise TelegramError(str(e))
             time.sleep(1); continue
         if j.get("ok"):
             return bunchify(j["result"])
+        desc = str(j.get("description"))
         if j.get("error_code") == 429:
             time.sleep(min(j.get("parameters", {}).get("retry_after", 2), 30)); continue
-        raise TelegramError("%s: %s" % (method, j.get("description")))
+        log("TELEGRAM ERROR in %s: %s" % (method, desc))
+        if j.get("error_code") == 400 and "not modified" not in desc:
+            # stage 1: drop custom emoji + button icon/style; stage 2: strip all html tags
+            if stage == 0:
+                stage = 1
+                for key in ("text", "caption"):
+                    if isinstance(data.get(key), str): data[key] = _TGEMOJI.sub(r"\1", data[key])
+                if "reply_markup" in data: data["reply_markup"] = _strip_custom(data["reply_markup"])
+                log("  -> retrying without custom emoji/button styles")
+                continue
+            if stage == 1 and data.get("parse_mode") == "HTML" and ("parse entities" in desc or "entities" in desc):
+                stage = 2
+                for key in ("text", "caption"):
+                    if isinstance(data.get(key), str): data[key] = _TAGS.sub("", data[key])
+                data.pop("parse_mode", None)
+                log("  -> retrying as plain text")
+                continue
+        raise TelegramError("%s: %s" % (method, desc))
     raise TelegramError("%s failed" % method)
 
 # ---- keyboard helper classes (telebot-style)
@@ -205,8 +268,14 @@ class InlineKeyboardButton:
     def to_dict(self): return self.d
 
 class InlineKeyboardMarkup:
-    def __init__(self, row_width=3, **k):
-        self.rows, self.row_width = [], row_width
+    def __init__(self, keyboard=None, row_width=3, **k):
+        self.rows, self.row_width = [], 3
+        if isinstance(keyboard, int) and not isinstance(keyboard, bool):
+            self.row_width = keyboard
+        elif keyboard:
+            for r in keyboard:
+                self.rows.append(list(r) if isinstance(r, (list, tuple)) else [r])
+        if row_width != 3: self.row_width = row_width
     def add(self, *btns, row_width=None):
         w = row_width or self.row_width
         for i in range(0, len(btns), w):
@@ -228,6 +297,8 @@ class KeyboardButton:
 class ReplyKeyboardMarkup:
     def __init__(self, resize_keyboard=True, one_time_keyboard=False, row_width=3, selective=None, **k):
         self.rows, self.resize, self.one, self.row_width = [], bool(resize_keyboard), one_time_keyboard, row_width
+        if isinstance(resize_keyboard, (list, tuple)):
+            self.rows, self.resize = [list(r) if isinstance(r, (list, tuple)) else [r] for r in resize_keyboard], True
     def add(self, *btns, row_width=None):
         w = row_width or self.row_width
         for i in range(0, len(btns), w): self.rows.append(list(btns[i:i + w]))
@@ -326,7 +397,7 @@ class _HTTP:
     def _do(self, m, url, **k):
         self._check(url, k.get("params"), k.get("data"), k.get("json"))
         k.setdefault("timeout", 30)
-        return _Resp(requests.request(m, url, **k))
+        return _Resp(HTTP_SESSION.request(m, url, **k))
     def get(self, url, **k): return self._do("GET", url, **k)
     def post(self, url, **k): return self._do("POST", url, **k)
     def put(self, url, **k): return self._do("PUT", url, **k)
@@ -364,7 +435,7 @@ class _TbcAds:
 class _Webhook:
     def getUrlFor(self, command, user_id=None, **k):
         base = PUBLIC_URL or ("http://127.0.0.1:%d" % WEBHOOK_PORT)
-        q = urllib.parse.quote(str(command), safe="")
+        q = urllib.parse.quote(str(command).lstrip("/"), safe="")
         return "%s/wh/%s/%s/%s" % (base, WEBHOOK_SECRET, q, user_id if user_id is not None else "0")
 
 class _Libs:
@@ -377,7 +448,33 @@ class _Libs:
 WEBHOOK_SECRET = hashlib.sha256(("wh" + BOT_TOKEN).encode()).hexdigest()[:24]
 
 # ---------------------------------------------------------------- command engine
-COMMANDS = json.load(open(os.path.join(HERE, "commands.json"), encoding="utf-8"))
+def parse_commands_text(txt):
+    """Accepts TBC export format ('=== /name ===') and the .py banner format ('# COMMAND: /name')."""
+    txt = txt.replace("\r\n", "\n")
+    if re.search(r"(?m)^=== .+? ===$", txt):
+        parts = re.split(r"(?m)^=== (.+?) ===$", txt)
+        return {n.strip(): c.strip("\n") for n, c in zip(parts[1::2], parts[2::2])}
+    if re.search(r"(?m)^# COMMAND: .+$", txt):
+        parts = re.split(r"(?m)^# COMMAND: (.+)$", txt)
+        out = {}
+        for n, c in zip(parts[1::2], parts[2::2]):
+            c = re.sub(r"(?m)^#={20,}\s*$", "", c)
+            out[n.strip()] = c.strip("\n")
+        return out
+    return {}
+
+def load_commands():
+    for fn in ("commands.txt", "commands.tpy"):
+        p = os.path.join(HERE, fn)
+        if os.path.exists(p):
+            cmds = parse_commands_text(open(p, encoding="utf-8").read())
+            if cmds:
+                log("loaded %d commands from %s" % (len(cmds), fn)); return cmds
+            log("WARNING: %s found but no commands parsed (need '=== /name ===' blocks)" % fn)
+    cmds = json.load(open(os.path.join(HERE, "commands.json"), encoding="utf-8"))
+    log("loaded %d commands from commands.json" % len(cmds)); return cmds
+
+COMMANDS = CFG["commands"] if "commands" in CFG else load_commands()
 _compiled = {}
 BOT_INFO = Bunch()
 _pool = ThreadPoolExecutor(max_workers=WORKERS)
@@ -408,11 +505,13 @@ def run_command(name, ctx, depth=0):
     CURRENT_USER.u = ctx.u
     CURRENT_CB.id = ctx.cb_id
     g = build_globals(ctx, depth)
+    STATS["commands"] += 1
     try:
         exec(code, g)
     except ReturnCommand:
         pass
     except Exception:
+        STATS["errors"] += 1
         log("ERROR in command %s (user %s):\n%s" % (name, ctx.u, traceback.format_exc(limit=6)))
     return True
 
@@ -446,8 +545,28 @@ class _BotHigh(_BotData):
         return {"id": str(jid), "command": command, "timeout": secs}
     def cancelScheduledTask(self, jid):
         with _dblock: _db.execute("DELETE FROM jobs WHERE id=?", (str(jid),))
-    def replyText(self, text, **kw): return tg("sendMessage", chat_id=self.ctx.u, text=text, **kw)
-    def sendMessage(self, text, **kw): return tg("sendMessage", chat_id=self.ctx.u, text=text, **kw)
+    _PM = {"html", "markdown", "markdownv2", "md"}
+    def _split_args(self, args, kw):
+        """TBC forms: (text) | (text, parse_mode) | (chat_id, text) | (chat_id, text, parse_mode)"""
+        args = list(args)
+        chat = kw.pop("chat_id", None)
+        if len(args) >= 2 and not (isinstance(args[1], str) and args[1].lower() in self._PM and not _isint(args[0])):
+            if chat is None and (_isint(args[0]) or str(args[0]).startswith("@")):
+                chat = args.pop(0)
+        elif len(args) >= 2 and chat is None and _isint(args[0]) and not isinstance(args[0], str):
+            chat = args.pop(0)
+        text = args.pop(0) if args else kw.pop("text", None)
+        if args and "parse_mode" not in kw: kw["parse_mode"] = args.pop(0)
+        return (chat if chat is not None else self.ctx.u), text, kw
+    def replyText(self, *args, **kw):
+        chat, text, kw = self._split_args(args, kw)
+        return tg("sendMessage", chat_id=chat, text=text, **kw)
+    sendMessage = replyText
+    def sendPhoto(self, *args, **kw): return tg("sendPhoto", chat_id=kw.pop("chat_id", self.ctx.u), **_poskw(args, ["photo", "caption"], kw))
+    def sendDocument(self, *args, **kw): return tg("sendDocument", chat_id=kw.pop("chat_id", self.ctx.u), **_poskw(args, ["document", "caption"], kw))
+    def editMessageText(self, *args, **kw):
+        kw.setdefault("chat_id", self.ctx.u)
+        return tg("editMessageText", **_poskw(args, ["text"], kw))
     def broadcast(self, function=None, callback_url=None, command=None, code=None, **kwargs):
         func = _camel(function or "send_message")
         with _dblock:
@@ -492,6 +611,16 @@ class _User:
 class _Time:
     def __getattr__(self, n): return getattr(time, n)
 
+def _isint(x):
+    if isinstance(x, bool): return False
+    if isinstance(x, int): return True
+    return isinstance(x, str) and bool(re.fullmatch(r"-?\d{5,}", x))
+
+def _poskw(args, names, kw):
+    for i, a in enumerate(args):
+        if i < len(names): kw[names[i]] = a
+    return kw
+
 def isNumeric(x):
     try: float(str(x)); return True
     except Exception: return False
@@ -524,7 +653,7 @@ def build_globals(ctx, depth):
         hashlib=hashlib, base64=base64, re=re, regex=re, time=time, json=json, math=math, random=random,
         datetime=datetime, binascii=__import__("binascii"),
     )
-    g["call"] = ctx.message if ctx.update_type == "callback_query" else None
+    g["call"] = ctx.message
     return g
 
 def _norm_cmd_token(tok):
@@ -562,12 +691,21 @@ def _run_at_handler(ctx):
     return True
 
 def handle_update(upd):
+    t0 = time.time()
     try:
         _handle_update(upd)
     except Exception:
         log("update handler crashed:\n" + traceback.format_exc())
+    finally:
+        dt = time.time() - t0
+        if dt > 1.5:
+            log("SLOW update took %.1fs" % dt)
 
 def _handle_update(upd):
+    h = int(time.time() // 3600)
+    STATS["hours"][h] = STATS["hours"].get(h, 0) + 1
+    STATS["updates"] += 1
+    for old in [k for k in STATS["hours"] if k < h - 30]: STATS["hours"].pop(old, None)
     if "message" in upd:
         m = bunchify(upd["message"]); utype = "message"
     elif "callback_query" in upd:
@@ -610,7 +748,8 @@ def _handle_update(upd):
         command, params, options = None, None, None
         if utype == "message":
             wait = None
-            is_known_cmd = bool(text) and text.startswith("/") and _norm_cmd_token(text.split()[0]) in COMMANDS
+            is_known_cmd = bool(text) and ((text.startswith("/") and _norm_cmd_token(text.split()[0]) in COMMANDS)
+                                           or (text in COMMANDS and text not in ("@", "*")))
             if not is_known_cmd:
                 wait = _pop_wait(uid)
             else:
@@ -641,13 +780,15 @@ def _handle_update(upd):
                 command = text
             elif "*" in COMMANDS:
                 command = "*"
+        if command and utype == "callback_query":
+            with _dblock: _db.execute("DELETE FROM waits WHERE user=?", (str(uid),))
         if command:
             ctx.params, ctx.options = params, options
             run_command(command, ctx)
 
 # ---------------------------------------------------------------- scheduler
 def scheduler_loop():
-    while True:
+    while not STOP.is_set():
         try:
             with _dblock:
                 rows = _db.execute("SELECT id,command,options,user,ctx FROM jobs WHERE run_at<=?", (time.time(),)).fetchall()
@@ -670,6 +811,26 @@ def _run_job(cmd, opts, uid, ctxj):
         log("job failed:\n" + traceback.format_exc())
 
 # ---------------------------------------------------------------- webhook server
+def handle_webhook(command, uid, raw="", query=""):
+    """called for GET/POST /wh/<secret>/<command>/<uid>; returns response bytes"""
+    if command not in COMMANDS and "/" + command in COMMANDS: command = "/" + command
+    payload = None
+    if raw:
+        try: payload = json.loads(raw)
+        except Exception:
+            payload = {k: v[0] if len(v) == 1 else v for k, v in urllib.parse.parse_qs(raw).items()}
+    if payload is None:
+        q = {k: v[0] if len(v) == 1 else v for k, v in urllib.parse.parse_qs(query or "").items()}
+        payload = q or None
+    uid_i = int(uid) if str(uid).lstrip("-").isdigit() else uid
+    m = Bunch({"chat": Bunch({"id": uid_i, "type": "private"}), "from": Bunch({"id": uid_i, "first_name": "User"}),
+               "update_type": "webhook"})
+    ctx = Ctx(uid_i, m, "webhook", None, None, make_options(payload))
+    def job():
+        with user_lock(uid_i): run_command(command, ctx)
+    _pool.submit(job)
+    return b'{"ok":true}'
+
 class WebhookHandler(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def _go(self):
@@ -678,23 +839,9 @@ class WebhookHandler(BaseHTTPRequestHandler):
             parts = [urllib.parse.unquote(p) for p in u.path.strip("/").split("/")]
             if len(parts) < 4 or parts[0] != "wh" or parts[1] != WEBHOOK_SECRET:
                 self.send_response(404); self.end_headers(); return
-            command, uid = parts[2], parts[3]
             n = int(self.headers.get("Content-Length") or 0)
             raw = self.rfile.read(n).decode("utf-8", "replace") if n else ""
-            payload = None
-            if raw:
-                try: payload = json.loads(raw)
-                except Exception:
-                    payload = {k: v[0] if len(v) == 1 else v for k, v in urllib.parse.parse_qs(raw).items()}
-            if payload is None:
-                q = {k: v[0] if len(v) == 1 else v for k, v in urllib.parse.parse_qs(u.query).items()}
-                payload = q or None
-            uid_i = int(uid) if uid.lstrip("-").isdigit() else uid
-            m = Bunch({"chat": Bunch({"id": uid_i, "type": "private"}), "from": Bunch({"id": uid_i, "first_name": "User"}),
-                       "update_type": "webhook"})
-            ctx = Ctx(uid_i, m, "webhook", None, None, make_options(payload))
-            _pool.submit(lambda: (user_lock(uid_i).acquire(), run_command(command, ctx), user_lock(uid_i).release()))
-            body = b'{"ok":true}'
+            body = handle_webhook(parts[2], parts[3], raw, u.query)
             self.send_response(200); self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
         except Exception:
@@ -705,7 +852,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
 # ---------------------------------------------------------------- main loop
 def main():
     if not BOT_TOKEN:
-        sys.exit("Set BOT_TOKEN in .env (see README.md)")
+        raise SystemExit("Set BOT_TOKEN in .env (see README.md)")
     me = tg("getMe")
     BOT_INFO.update({"token": BOT_TOKEN, "bot_id": me.id, "bot_username": me.username, "bot_name": me.first_name,
                      "username": me.username, "id": me.id, "first_name": me.first_name, "status": "working"})
@@ -713,20 +860,24 @@ def main():
     try: tg("deleteWebhook", drop_pending_updates=False)
     except Exception: pass
     threading.Thread(target=scheduler_loop, daemon=True).start()
-    srv = ThreadingHTTPServer(("0.0.0.0", WEBHOOK_PORT), WebhookHandler)
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
-    log("webhook server on port %d (PUBLIC_URL=%s)" % (WEBHOOK_PORT, PUBLIC_URL or "not set"))
+    if not CFG.get("shared_webhook"):
+        srv = ThreadingHTTPServer(("0.0.0.0", WEBHOOK_PORT), WebhookHandler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        log("webhook server on port %d (PUBLIC_URL=%s)" % (WEBHOOK_PORT, PUBLIC_URL or "not set"))
     with _dblock:
         r = _db.execute("SELECT v FROM meta WHERE k='offset'").fetchone()
     offset = int(r[0]) if r else 0
     allowed = ["message", "callback_query", "my_chat_member", "chat_member", "chat_join_request",
                "edited_message", "channel_post", "inline_query", "pre_checkout_query", "message_reaction"]
-    while True:
+    while not STOP.is_set():
         try:
-            r = SESSION.post(API + "getUpdates", data={"offset": offset, "timeout": 50,
-                             "allowed_updates": json.dumps(allowed)}, timeout=65).json()
+            r = SESSION.post(API + "getUpdates", data={"offset": offset, "timeout": 25,
+                             "allowed_updates": json.dumps(allowed)}, timeout=40).json()
             if not r.get("ok"):
-                log("getUpdates error:", r); time.sleep(3); continue
+                log("getUpdates error:", r)
+                if r.get("error_code") == 409: log("Another program is using this token (stop it on TBC / elsewhere)")
+                if r.get("error_code") == 401: raise SystemExit("Invalid bot token")
+                STOP.wait(5); continue
             for upd in r["result"]:
                 offset = upd["update_id"] + 1
                 _pool.submit(handle_update, upd)
@@ -734,8 +885,11 @@ def main():
                 with _dblock: _db.execute("INSERT OR REPLACE INTO meta VALUES('offset',?)", (str(offset),))
         except KeyboardInterrupt:
             break
+        except SystemExit:
+            raise
         except Exception as e:
-            log("poll error:", e); time.sleep(3)
+            log("poll error:", e); STOP.wait(3)
+    log("stopped")
 
 if __name__ == "__main__":
     main()
