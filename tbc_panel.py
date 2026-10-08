@@ -3,7 +3,7 @@
 TBC-Lite panel: run MANY Telebot-Creator (TPY) bots on your own server with a web dashboard.
   python tbc_panel.py        (needs PANEL_PASSWORD in .env or environment)
 """
-import os, sys, json, time, threading, types, secrets, hmac, re, sqlite3, traceback, io, shutil, tempfile
+import hashlib, os, sys, json, time, threading, types, secrets, hmac, re, sqlite3, traceback, io, shutil, tempfile
 try:
     import requests
     from flask import Flask, request, redirect, session, render_template, abort, Response, url_for, flash
@@ -22,6 +22,7 @@ def _load_env():
 _load_env()
 
 HOST = os.environ.get("PANEL_HOST", "0.0.0.0")
+APP_TITLE = os.environ.get("PANEL_TITLE", "My Telebot Panel")
 PORT = int(os.environ.get("PANEL_PORT") or os.environ.get("SERVER_PORT") or os.environ.get("PORT") or "2222")
 PUBLIC_URL = os.environ.get("PUBLIC_URL", "").rstrip("/")
 WORKERS_PER_BOT = int(os.environ.get("WORKERS_PER_BOT", "4"))
@@ -56,6 +57,11 @@ _pdb.row_factory = sqlite3.Row
 _plock = threading.RLock()
 _pdb.execute("""CREATE TABLE IF NOT EXISTS bots(id INTEGER PRIMARY KEY AUTOINCREMENT, token TEXT UNIQUE,
     name TEXT, username TEXT, enabled INTEGER DEFAULT 0, created REAL, note TEXT DEFAULT '')""")
+_pdb.execute("CREATE TABLE IF NOT EXISTS settings(k TEXT PRIMARY KEY, v TEXT)")
+_pdb.execute("CREATE TABLE IF NOT EXISTS hourly(hour INTEGER, bot_id INTEGER, n INTEGER, PRIMARY KEY(hour,bot_id))")
+for _c, _d in (("pinned", "INTEGER DEFAULT 0"), ("error_chat", "TEXT DEFAULT ''"), ("miniapp_secret", "TEXT DEFAULT ''"), ("tg_id", "INTEGER")):
+    try: _pdb.execute("ALTER TABLE bots ADD COLUMN %s %s" % (_c, _d))
+    except Exception: pass
 def q(sql, args=()):
     with _plock: return _pdb.execute(sql, args).fetchall()
 def q1(sql, args=()):
@@ -115,7 +121,8 @@ class Runner:
             self.cmds = load_cmds_file(self.bid)
         cfg = {"token": self.token, "dir": bot_dir(self.bid), "db_path": db_file(self.bid), "commands": self.cmds,
                "workers": WORKERS_PER_BOT, "tag": "#%d" % self.bid, "shared_webhook": True,
-               "public_url": PUBLIC_URL or "http://127.0.0.1:%d" % PORT}
+               "public_url": PUBLIC_URL or "http://127.0.0.1:%d" % PORT,
+               "error_chat": (q1("SELECT error_chat FROM bots WHERE id=?", (self.bid,))["error_chat"] or setting("error_chat") or "").strip()}
         try:
             mod = types.ModuleType("tbcbot_%d" % self.bid)
             mod.__dict__["CONFIG"] = cfg; mod.__dict__["__file__"] = RUNTIME_PATH
@@ -181,67 +188,256 @@ def fetch_me(token):
     except Exception as e:
         return False, "network error: %s" % e
 
-# ------------------------------------------------------------------ stats helpers (cached)
+# ------------------------------------------------------------------ settings, password
+def setting(k, default=""):
+    r = q1("SELECT v FROM settings WHERE k=?", (k,)); return r["v"] if r else default
+def set_setting(k, v): x("INSERT OR REPLACE INTO settings VALUES(?,?)", (k, v))
+
+def _hash_pw(pw, salt=None):
+    salt = salt or secrets.token_hex(8)
+    return salt + "$" + hashlib.pbkdf2_hmac("sha256", pw.encode(), salt.encode(), 120000).hex()
+def check_pw(pw):
+    h = setting("pw_hash")
+    if h:
+        salt, _ = h.split("$", 1); return hmac.compare_digest(_hash_pw(pw, salt), h)
+    return hmac.compare_digest(pw, PASSWORD)
+
+# ------------------------------------------------------------------ per-bot sqlite helpers
+SCHEMA = ["CREATE TABLE IF NOT EXISTS bot_data(name TEXT PRIMARY KEY, value TEXT)",
+    "CREATE TABLE IF NOT EXISTS user_data(user TEXT, name TEXT, value TEXT, PRIMARY KEY(user,name))",
+    "CREATE TABLE IF NOT EXISTS res(scope TEXT, user TEXT, name TEXT, value REAL, PRIMARY KEY(scope,user,name))",
+    "CREATE TABLE IF NOT EXISTS waits(user TEXT PRIMARY KEY, command TEXT, options TEXT)",
+    "CREATE TABLE IF NOT EXISTS users(user TEXT PRIMARY KEY, first_seen REAL, last_seen REAL, blocked INTEGER DEFAULT 0)",
+    "CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, run_at REAL, command TEXT, options TEXT, user TEXT, ctx TEXT)",
+    "CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT)",
+    "CREATE TABLE IF NOT EXISTS errors(id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, command TEXT, user TEXT, etype TEXT, msg TEXT, line INTEGER, ctx TEXT, tb TEXT)",
+    "CREATE TABLE IF NOT EXISTS broadcasts(id TEXT PRIMARY KEY, ts REAL, text TEXT, total INTEGER, ok INTEGER, err INTEGER, status TEXT)"]
+def dbc(bid):
+    c = sqlite3.connect(db_file(bid), timeout=30); c.execute("PRAGMA journal_mode=WAL")
+    for s in SCHEMA: c.execute(s)
+    try: c.execute("ALTER TABLE users ADD COLUMN blocked INTEGER DEFAULT 0")
+    except Exception: pass
+    return c
+
 _cache = {}
 def cached(key, ttl, fn):
     v = _cache.get(key)
     if v and time.time() - v[0] < ttl: return v[1]
     val = fn(); _cache[key] = (time.time(), val); return val
 
-def user_counts(bid):
+def user_stats(bid):
     def f():
-        p = db_file(bid)
-        if not os.path.exists(p): return (0, 0)
+        z = dict(total=0, a24=0, a7=0, a30=0, n24=0, n7=0, n30=0, blocked=0, last=0)
+        if not os.path.exists(db_file(bid)): return z
         try:
-            c = sqlite3.connect(p, timeout=10)
-            tot = c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-            act = c.execute("SELECT COUNT(*) FROM users WHERE last_seen>?", (time.time() - 86400,)).fetchone()[0]
-            c.close(); return (tot, act)
-        except Exception: return (0, 0)
-    return cached(("uc", bid), 30, f)
+            c = sqlite3.connect(db_file(bid), timeout=10); n = time.time()
+            a = (n - 86400, n - 7 * 86400, n - 30 * 86400)
+            try:
+                r = c.execute("SELECT COUNT(*),SUM(last_seen>?),SUM(last_seen>?),SUM(last_seen>?),SUM(first_seen>?),SUM(first_seen>?),SUM(first_seen>?),SUM(COALESCE(blocked,0)),MAX(last_seen) FROM users", a + a).fetchone()
+            except Exception:
+                r = list(c.execute("SELECT COUNT(*),SUM(last_seen>?),SUM(last_seen>?),SUM(last_seen>?),SUM(first_seen>?),SUM(first_seen>?),SUM(first_seen>?),0,MAX(last_seen) FROM users", a + a).fetchone())
+            c.close()
+            return dict(zip(("total", "a24", "a7", "a30", "n24", "n7", "n30", "blocked", "last"), [v or 0 for v in r]))
+        except Exception: return z
+    return cached(("us", bid), 20, f)
 
-def bots_overview():
-    rows = q("SELECT * FROM bots ORDER BY id DESC")
+def user_counts(bid):
+    s = user_stats(bid); return (s["total"], s["a24"])
+
+def get_errors(bid, limit=100):
+    if not os.path.exists(db_file(bid)): return []
+    try:
+        c = sqlite3.connect(db_file(bid), timeout=10); c.row_factory = sqlite3.Row
+        rows = c.execute("SELECT * FROM errors ORDER BY id DESC LIMIT ?", (limit,)).fetchall(); c.close()
+    except Exception: return []
     out = []
-    for b in rows:
-        r = RUNNERS.get(b["id"])
-        tot, act = user_counts(b["id"])
-        out.append({"id": b["id"], "name": b["name"] or "?", "username": b["username"] or "", "enabled": b["enabled"],
-                    "state": r.state if r else "stopped", "err": r.err if r else "", "users": tot, "active": act,
-                    "cmds": len(get_cmds(b["id"])) if not (r and r.alive) else len(r.cmds or {})})
+    for r in rows:
+        d = dict(r)
+        try: d["ctx"] = json.loads(d["ctx"] or "[]")
+        except Exception: d["ctx"] = []
+        out.append(d)
     return out
 
-def hourly_series():
-    now_h = int(time.time() // 3600); agg = {}
-    for r in list(RUNNERS.values()):
-        if r.mod:
-            for h, n in list(r.mod.STATS["hours"].items()): agg[h] = agg.get(h, 0) + n
-    return [agg.get(h, 0) for h in range(now_h - 23, now_h + 1)]
+def error_count(bid):
+    def f():
+        if not os.path.exists(db_file(bid)): return 0
+        try:
+            c = sqlite3.connect(db_file(bid), timeout=10); n = c.execute("SELECT COUNT(*) FROM errors").fetchone()[0]; c.close(); return n
+        except Exception: return 0
+    return cached(("ec", bid), 15, f)
+
+def bots_overview():
+    out = []
+    for b in q("SELECT * FROM bots ORDER BY pinned DESC, id DESC"):
+        r = RUNNERS.get(b["id"]); s = user_stats(b["id"])
+        out.append({"id": b["id"], "tgid": b["tg_id"] or b["id"], "name": b["name"] or "?", "username": b["username"] or "", "enabled": b["enabled"], "pinned": b["pinned"],
+                    "state": r.state if r else "stopped", "err": r.err if r else "", "users": s["total"], "active": s["a24"],
+                    "cmds": len(r.cmds) if (r and r.alive and r.cmds is not None) else len(load_cmds_file(b["id"]))})
+    return out
+
+# ------------------------------------------------------------------ hourly sampler (dashboard chart)
+_last = {}
+def sampler():
+    while True:
+        time.sleep(30)
+        try:
+            h = int(time.time() // 3600)
+            for bid, r in list(RUNNERS.items()):
+                if r.mod:
+                    cur = r.mod.STATS["commands"]; key = (bid, id(r.mod)); d = cur - _last.get(key, cur); _last[key] = cur
+                    if d > 0: x("INSERT INTO hourly(hour,bot_id,n) VALUES(?,?,?) ON CONFLICT(hour,bot_id) DO UPDATE SET n=n+excluded.n", (h, bid, d))
+            x("DELETE FROM hourly WHERE hour<?", (h - 24 * 8,))
+        except Exception: traceback.print_exc()
+
+def dash_data():
+    now_h = int(time.time() // 3600); start = now_h - 23
+    m = {r["hour"]: r["n"] for r in q("SELECT hour, SUM(n) n FROM hourly WHERE hour>=? GROUP BY hour", (start,))}
+    series = [m.get(h, 0) for h in range(start, now_h + 1)]
+    ov = bots_overview(); by = {b["id"]: b for b in ov}
+    top = []
+    for r in q("SELECT bot_id, SUM(n) n FROM hourly WHERE hour>=? GROUP BY bot_id ORDER BY n DESC LIMIT 5", (start,)):
+        if r["bot_id"] in by: top.append(by[r["bot_id"]])
+    for b in sorted(ov, key=lambda b: -b["users"]):
+        if len(top) >= 5: break
+        if b not in top: top.append(b)
+    tot = sum(series)
+    return dict(series=series, hours=[h * 3600 for h in range(start, now_h + 1)], cmds=tot, peak=max(series) if series else 0,
+                avg=round(tot / 24), active_hrs=sum(1 for v in series if v > 0), total=len(ov),
+                working=sum(1 for b in ov if b["state"] == "running"), users=sum(b["users"] for b in ov),
+                active=sum(b["active"] for b in ov), top=top)
+
+# ------------------------------------------------------------------ import / export formats
+CODE_KEYS = ("code", "script", "content", "body", "tpy", "source", "python", "command_code", "text")
+NAME_KEYS = ("name", "command", "cmd", "pattern", "trigger", "title", "id")
+def _pick(d, keys):
+    for k in keys:
+        if k in d and isinstance(d[k], str): return d[k]
+    return None
+
+def extract_commands(obj, depth=0):
+    """tolerant: finds commands in many JSON layouts (dict name->code, list of {name,code}, nested 'commands' ...)"""
+    if depth > 4: return {}
+    if isinstance(obj, dict):
+        for key in ("commands", "Commands", "cmds", "bot_commands", "command_list"):
+            if key in obj:
+                r = extract_commands(obj[key], depth + 1)
+                if r: return r
+        if obj and all(isinstance(v, str) for v in obj.values()) and any(k.startswith("/") or "\n" in v for k, v in obj.items()):
+            return dict(obj)
+        out = {}
+        for k, v in obj.items():
+            if isinstance(v, dict):
+                c = _pick(v, CODE_KEYS)
+                if c is not None: out[k] = c
+        if out: return out
+        for v in obj.values():
+            if isinstance(v, (dict, list)):
+                r = extract_commands(v, depth + 1)
+                if r: return r
+    elif isinstance(obj, list):
+        out = {}
+        for it in obj:
+            if isinstance(it, dict):
+                n, c = _pick(it, NAME_KEYS), _pick(it, CODE_KEYS)
+                if n is not None and c is not None: out[n] = c
+        return out
+    return {}
+
+def extract_data(obj):
+    if isinstance(obj, dict):
+        for key in ("bot_data", "botData", "bot_variables", "storage"):
+            if isinstance(obj.get(key), dict): return obj[key]
+    return {}
+
+def parse_any(txt):
+    txt = txt.lstrip("\ufeff"); s = txt.lstrip()
+    if s[:1] in "{[":
+        try: obj = json.loads(s)
+        except Exception: obj = None
+        if obj is not None: return extract_commands(obj), extract_data(obj)
+    return parse_commands_text(txt), {}
+
+def bot_export_obj(bid, with_data=False, with_users=False):
+    b = q1("SELECT * FROM bots WHERE id=?", (bid,))
+    o = {"format": "tbc-lite/1", "exported": int(time.time()), "bot": {"id": bid, "name": b["name"], "username": b["username"]},
+         "commands": get_cmds(bid)}
+    if with_data and os.path.exists(db_file(bid)):
+        c = dbc(bid); o["bot_data"] = {k: _dec(v) for k, v in c.execute("SELECT name,value FROM bot_data").fetchall()}
+        if with_users: o["users"] = [r[0] for r in c.execute("SELECT user FROM users").fetchall()]
+        c.close()
+    return o
+def _dec(s):
+    try: return json.loads(s)
+    except Exception: return s
+
+def bulk_update(bid, changes):
+    """changes: name -> code (or None to delete); one disk write"""
+    with _lock_for(bid):
+        r = RUNNERS.get(int(bid)); live = r.cmds if (r and r.alive and r.cmds is not None) else None
+        cmds = live if live is not None else load_cmds_file(bid)
+        for n, c in changes.items():
+            if c is None: cmds.pop(n, None)
+            else: cmds[n] = c
+            if r and r.mod: r.mod._compiled.pop(n, None)
+        save_cmds_file(bid, cmds)
+
+def import_into(bid, cmds, data, merge, with_data=True):
+    n = replace_cmds(bid, cmds, merge) if cmds else len(get_cmds(bid))
+    nd = 0
+    if data and with_data:
+        c = dbc(bid)
+        for k, v in data.items(): c.execute("INSERT OR REPLACE INTO bot_data VALUES(?,?)", (str(k), json.dumps(v, ensure_ascii=False))); nd += 1
+        c.commit(); c.close()
+    return n, nd
 
 # ------------------------------------------------------------------ web app
-app = Flask(__name__)
+from flask import jsonify, send_file
+import hashlib
+app = Flask(__name__, template_folder=os.path.join(HERE, "templates"), static_folder=os.path.join(HERE, "static"))
 keyfile = os.path.join(DATA_DIR, "secret.key")
 if not os.path.exists(keyfile): open(keyfile, "w").write(secrets.token_hex(32))
 app.secret_key = open(keyfile).read().strip()
-app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax", MAX_CONTENT_LENGTH=40 * 1024 * 1024, MAX_FORM_MEMORY_SIZE=40 * 1024 * 1024,
-                  PERMANENT_SESSION_LIFETIME=60 * 60 * 24 * 7)
-
+app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax", MAX_CONTENT_LENGTH=60 * 1024 * 1024,
+                  MAX_FORM_MEMORY_SIZE=60 * 1024 * 1024, PERMANENT_SESSION_LIFETIME=60 * 60 * 24 * 7, TEMPLATES_AUTO_RELOAD=True)
 _fails = {}
 def _ip(): return request.headers.get("X-Forwarded-For", request.remote_addr or "?").split(",")[0].strip()
 
 @app.before_request
 def guard():
-    if request.path.startswith("/wh/") or request.path == "/health": return
-    if request.path == "/login": return
+    if request.path.startswith(("/wh/", "/app/", "/static/")) or request.path in ("/health", "/login"): return
     if not session.get("ok"): return redirect("/login")
     if request.method == "POST":
         tok = request.form.get("csrf") or request.headers.get("X-CSRF")
         if not tok or not hmac.compare_digest(tok, session.get("csrf", "")): abort(400, "bad csrf token (refresh the page)")
 
+@app.after_request
+def nocache(resp):
+    if not request.path.startswith("/static/"): resp.headers["Cache-Control"] = "no-store"
+    return resp
+
 @app.context_processor
 def inject():
     if "csrf" not in session: session["csrf"] = secrets.token_hex(16)
-    return {"csrf": session["csrf"]}
+    def recent_errors():
+        def f():
+            n = 0
+            for b in q("SELECT id FROM bots"):
+                try: n += sum(1 for e in get_errors(b["id"], 5) if time.time() - e["ts"] < 3600)
+                except Exception: pass
+            return n
+        return cached("recent_errors", 30, f)
+    return {"csrf": session["csrf"], "APP_TITLE": setting("title") or APP_TITLE, "recent_errors": recent_errors if session.get("ok") else (lambda: 0)}
+
+@app.template_filter("compact")
+def compact(n):
+    n = int(n or 0)
+    return "%.1fk" % (n / 1000.0) if n >= 100000 and False else ("%dk" % round(n / 1000.0) if n >= 10000 else "{:,}".format(n))
+@app.template_filter("date")
+def f_date(ts): return time.strftime("%-d %b %Y", time.localtime(ts)) if ts else "—"
+@app.template_filter("dt")
+def f_dt(ts): return time.strftime("%-d %b, %H:%M", time.localtime(ts)) if ts else "—"
+@app.template_filter("uq")
+def f_uq(s): return requests.utils.quote(str(s), safe="")
 
 @app.route("/health")
 def health(): return "ok"
@@ -251,76 +447,90 @@ def login():
     err = ""
     if request.method == "POST":
         ip = _ip(); f = _fails.get(ip, (0, 0))
-        if f[0] >= 5 and time.time() - f[1] < 300:
-            err = "Too many attempts. Wait 5 minutes."
-        elif hmac.compare_digest(request.form.get("password", ""), PASSWORD):
+        if f[0] >= 5 and time.time() - f[1] < 300: err = "Too many attempts. Wait 5 minutes."
+        elif check_pw(request.form.get("password", "")):
             session.clear(); session["ok"] = True; session["csrf"] = secrets.token_hex(16); session.permanent = True
             _fails.pop(ip, None); return redirect("/")
-        else:
-            _fails[ip] = (f[0] + 1 if time.time() - f[1] < 300 else 1, time.time()); err = "Wrong password"
+        else: _fails[ip] = (f[0] + 1 if time.time() - f[1] < 300 else 1, time.time()); err = "Wrong password"
     return render_template("login.html", err=err)
 
 @app.route("/logout", methods=["POST"])
-def logout():
-    session.clear(); return redirect("/login")
+def logout(): session.clear(); return redirect("/login")
 
 @app.route("/")
-def dashboard():
-    ov = bots_overview()
-    running = [b for b in ov if b["state"] == "running"]
-    series = hourly_series(); mx = max(series) or 1
-    cmds_run = sum(r.mod.STATS["commands"] for r in RUNNERS.values() if r.mod)
-    errs = sum(r.mod.STATS["errors"] for r in RUNNERS.values() if r.mod)
-    top = sorted(ov, key=lambda b: -b["users"])[:8]
-    return render_template("dashboard.html", total=len(ov), running=len(running), users=sum(b["users"] for b in ov),
-        active=sum(b["active"] for b in ov), cmds_run=cmds_run, errs=errs, series=series, mx=mx, top=top,
-        errbots=[b for b in ov if b["state"] == "error"])
+def dashboard(): return render_template("dashboard.html", d=dash_data(), nav="home")
 
 @app.route("/bots")
 def bots():
-    qs = request.args.get("q", "").strip().lower(); flt = request.args.get("f", "")
-    ov = bots_overview()
-    if qs: ov = [b for b in ov if qs in b["name"].lower() or qs in b["username"].lower() or qs == str(b["id"])]
-    if flt: ov = [b for b in ov if b["state"] == flt]
-    return render_template("bots.html", bots=ov, qs=qs, flt=flt, all_bots=bots_overview())
+    ov = bots_overview(); f = request.args.get("f", "all"); qs = request.args.get("q", "").strip().lower()
+    shown = ov
+    if f == "pinned": shown = [b for b in ov if b["pinned"]]
+    elif f in ("running", "stopped", "error"): shown = [b for b in ov if b["state"] == f]
+    if qs: shown = [b for b in shown if qs in b["name"].lower() or qs in b["username"].lower() or qs == str(b["id"])]
+    return render_template("bots.html", bots=shown, f=f, qs=qs, total=len(ov), pinned=sum(1 for b in ov if b["pinned"]),
+                           allusers=sum(b["users"] for b in ov), nav="bots")
+
+@app.route("/bots/new")
+def bots_new(): return render_template("bots_new.html", all_bots=bots_overview(), nav="bots")
 
 @app.route("/bots/add", methods=["POST"])
 def bots_add():
     lines = [l.strip() for l in request.form.get("tokens", "").splitlines() if l.strip()]
     tokens = [m.group(0) for l in lines for m in [re.search(r"\d{6,}:[A-Za-z0-9_-]{30,}", l)] if m]
     src = request.form.get("copy_from", ""); start = request.form.get("start") == "1"
-    src_cmds = get_cmds(int(src)) if src.isdigit() else {}
+    tcmds, tdata = {}, {}
+    f = request.files.get("file")
+    if f and f.filename: tcmds, tdata = parse_any(f.read().decode("utf-8", "replace"))
+    elif src.isdigit(): tcmds = dict(get_cmds(int(src)))
     ok = bad = 0
     for t in tokens:
         if q1("SELECT id FROM bots WHERE token=?", (t,)): flash("Already added: %s…" % t[:10]); continue
         good, info = fetch_me(t)
         if not good: bad += 1; flash("Token %s…: %s" % (t[:10], info)); continue
-        cur = x("INSERT INTO bots(token,name,username,enabled,created) VALUES(?,?,?,?,?)",
-                (t, info.get("first_name"), info.get("username"), 1 if start else 0, time.time()))
-        bid = cur.lastrowid; save_cmds_file(bid, dict(src_cmds)); ok += 1
+        cur = x("INSERT INTO bots(token,name,username,enabled,created,tg_id) VALUES(?,?,?,?,?,?)", (t, info.get("first_name"), info.get("username"), 1 if start else 0, time.time(), info.get("id")))
+        bid = cur.lastrowid; save_cmds_file(bid, dict(tcmds)); ok += 1
+        if tdata: import_into(bid, {}, tdata, True)
         if start: runner(bid).start()
     flash("Added %d bot(s)%s." % (ok, ", %d failed" % bad if bad else ""))
     return redirect("/bots")
+
+@app.route("/bots/bulk", methods=["POST"])
+def bots_bulk():
+    act = request.form.get("action"); n = 0
+    for b in q("SELECT id FROM bots"):
+        r = runner(b["id"])
+        if act == "start_all" and not r.alive: x("UPDATE bots SET enabled=1 WHERE id=?", (b["id"],)); r.start(); n += 1; time.sleep(0.05)
+        elif act == "stop_all" and r.alive: x("UPDATE bots SET enabled=0 WHERE id=?", (b["id"],)); r.stop(); n += 1
+    flash("%s %d bot(s)" % ("Started" if act == "start_all" else "Stopped", n)); return redirect("/bots")
+
+@app.route("/bots/export-all")
+def export_all():
+    import zipfile
+    buf = io.BytesIO(); z = zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED)
+    for b in q("SELECT id,username FROM bots"):
+        z.writestr("%s_%d.json" % (b["username"] or "bot", b["id"]), json.dumps(bot_export_obj(b["id"], request.args.get("data") == "1"), ensure_ascii=False))
+    z.close(); buf.seek(0)
+    return Response(buf.read(), mimetype="application/zip", headers={"Content-Disposition": "attachment; filename=all_bots.zip"})
 
 @app.route("/bots/import-zip", methods=["POST"])
 def import_zip():
     import zipfile
     f = request.files.get("file")
-    if not f or not f.filename: flash("Choose a .zip file"); return redirect("/bots")
+    if not f or not f.filename: flash("Choose a .zip file"); return redirect("/bots/new")
     merge = request.form.get("mode") == "merge"
     try: z = zipfile.ZipFile(io.BytesIO(f.read()))
-    except Exception: flash("Not a valid zip file"); return redirect("/bots")
-    bots_rows = [(b["id"], (b["username"] or "").lower()) for b in q("SELECT id,username FROM bots") if b["username"]]
-    done, skipped = [], []
+    except Exception: flash("Not a valid zip file"); return redirect("/bots/new")
+    rows = [(b["id"], (b["username"] or "").lower()) for b in q("SELECT id,username FROM bots") if b["username"]]
+    done, skipped = 0, []
     for info in z.infolist():
         if info.is_dir() or not info.filename.lower().endswith((".txt", ".py", ".json", ".tpy")): continue
         base = os.path.basename(info.filename).rsplit(".", 1)[0].lower()
-        hits = sorted([(len(u), bid) for bid, u in bots_rows if u and u in base], reverse=True)
+        hits = sorted([(len(u), bid) for bid, u in rows if u and u in base], reverse=True)
         if not hits: skipped.append(os.path.basename(info.filename)); continue
-        new = parse_commands_text(z.read(info).decode("utf-8", "replace"))
-        if not new: skipped.append(os.path.basename(info.filename) + " (no commands found)"); continue
-        replace_cmds(hits[0][1], new, merge); done.append("#%d" % hits[0][1])
-    flash("Imported commands into %d bot(s)." % len(done) + (" Skipped: " + ", ".join(skipped[:8]) + ("…" if len(skipped) > 8 else "") if skipped else ""))
+        cmds, data = parse_any(z.read(info).decode("utf-8", "replace"))
+        if not cmds and not data: skipped.append(os.path.basename(info.filename) + " (nothing found)"); continue
+        import_into(hits[0][1], cmds, data, merge); done += 1
+    flash("Imported into %d bot(s)." % done + (" Skipped: " + ", ".join(skipped[:8]) + ("…" if len(skipped) > 8 else "") if skipped else ""))
     return redirect("/bots")
 
 def _bot_or_404(bid):
@@ -334,110 +544,318 @@ def bot_action(bid):
     if act == "start": x("UPDATE bots SET enabled=1 WHERE id=?", (bid,)); r.start()
     elif act == "stop": x("UPDATE bots SET enabled=0 WHERE id=?", (bid,)); r.stop()
     elif act == "restart": x("UPDATE bots SET enabled=1 WHERE id=?", (bid,)); r.restart()
+    elif act == "pin": x("UPDATE bots SET pinned=1-COALESCE(pinned,0) WHERE id=?", (bid,))
     elif act == "delete":
         r.stop(wait=True); RUNNERS.pop(bid, None); x("DELETE FROM bots WHERE id=?", (bid,))
         if request.form.get("purge") == "1": shutil.rmtree(bot_dir(bid), ignore_errors=True)
         flash("Bot deleted"); return redirect("/bots")
-    return redirect(request.form.get("next") or "/bots/%d" % bid)
+    return redirect(request.form.get("next") or "/bots/%d/intro" % bid)
+
+TABS = [("intro", "Intro", "layout"), ("commands", "Commands", "code"), ("search", "Search", "search"), ("miniapp", "Mini App", "code"),
+        ("manage", "Manage", "gear"), ("admin", "Admin", "users"), ("settings", "Settings", "sliders")]
+
+def bot_ctx(bid, tab):
+    b = _bot_or_404(bid); r = RUNNERS.get(bid)
+    return dict(b=b, bid=bid, tab=tab, tabs=TABS, nav="bots", state=r.state if r else "stopped", err=r.err if r else "",
+                nerr=error_count(bid), started=(r.mod.STATS["started"] if (r and r.alive and r.mod) else 0))
 
 @app.route("/bots/<int:bid>")
-def bot_page(bid):
-    b = _bot_or_404(bid); r = RUNNERS.get(bid); qs = request.args.get("q", "").strip().lower()
-    cmds = get_cmds(bid); names = sorted(n for n in cmds if qs in n.lower())
-    tot, act = user_counts(bid)
-    st = r.mod.STATS if (r and r.mod) else {"commands": 0, "errors": 0, "updates": 0}
-    return render_template("bot.html", b=b, state=r.state if r else "stopped", err=r.err if r else "", names=names,
-        ncmds=len(cmds), qs=qs, users=tot, active=act, st=st, size=lambda n: len(cmds[n]),
-        hook=bool(PUBLIC_URL))
+def bot_home(bid): _bot_or_404(bid); return redirect("/bots/%d/intro" % bid)
 
+@app.route("/bots/<int:bid>/<tab>", methods=["GET", "POST"])
+def bot_tab(bid, tab):
+    if tab not in [t[0] for t in TABS]: abort(404)
+    c = bot_ctx(bid, tab); b = c["b"]; cmds = get_cmds(bid)
+    if request.method == "POST":
+        if tab == "miniapp":
+            open(os.path.join(bot_dir(bid), "miniapp.html"), "w", encoding="utf-8").write(request.form.get("html", ""))
+            if not b["miniapp_secret"]: x("UPDATE bots SET miniapp_secret=? WHERE id=?", (secrets.token_urlsafe(9), bid))
+            flash("Mini app saved"); return redirect("/bots/%d/miniapp" % bid)
+        if tab == "settings":
+            if request.form.get("do") == "token":
+                t = request.form.get("token", "").strip(); good, info = fetch_me(t)
+                if not good: flash("Token rejected: %s" % info)
+                elif q1("SELECT id FROM bots WHERE token=? AND id<>?", (t, bid)): flash("That token is already used by another bot")
+                else:
+                    x("UPDATE bots SET token=?, name=?, username=?, tg_id=? WHERE id=?", (t, info.get("first_name"), info.get("username"), info.get("id"), bid))
+                    r = runner(bid); was = r.alive; r.stop(wait=True); RUNNERS.pop(bid, None)
+                    if was: runner(bid).start()
+                    flash("Token updated")
+            else:
+                ec = request.form.get("error_chat", "").strip()
+                x("UPDATE bots SET name=?, error_chat=?, note=? WHERE id=?", (request.form.get("name", "").strip() or b["name"], ec, request.form.get("note", ""), bid))
+                r = RUNNERS.get(bid)
+                if r and r.mod: r.mod.CFG["error_chat"] = ec or setting("error_chat")
+                flash("Settings saved")
+            return redirect("/bots/%d/settings" % bid)
+        abort(405)
+    if tab == "intro":
+        s = user_stats(bid); c.update(users=s["total"], last=s["last"], ncmds=len(cmds), url="https://t.me/%s" % b["username"])
+    elif tab == "commands":
+        recent = {e["command"] for e in get_errors(bid, 60)}
+        c.update(names=sorted(cmds, key=lambda n: n.lower()), errcmds=recent, ncmds=len(cmds))
+    elif tab == "search": c.update(ncmds=len(cmds))
+    elif tab == "miniapp":
+        p = os.path.join(bot_dir(bid), "miniapp.html"); html = open(p, encoding="utf-8").read() if os.path.exists(p) else DEFAULT_MINIAPP
+        base = PUBLIC_URL or request.host_url.rstrip("/")
+        c.update(html=html, url=("%s/app/%s" % (base, b["miniapp_secret"])) if b["miniapp_secret"] else "")
+    elif tab == "manage": c.update(others=[o for o in bots_overview() if o["id"] != bid], ncmds=len(cmds))
+    elif tab == "admin": return redirect("/bots/%d/admin/analytics" % bid)
+    elif tab == "settings": c.update(global_chat=setting("error_chat"))
+    return render_template("bot_%s.html" % tab, **c)
+
+DEFAULT_MINIAPP = """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<script src="https://telegram.org/js/telegram-web-app.js"></script><title>Mini App</title></head>
+<body style="font-family:sans-serif;text-align:center;padding:30px"><h2>Hello 👋</h2><p id="u"></p>
+<script>const t=window.Telegram&&Telegram.WebApp;if(t){t.ready();document.getElementById('u').textContent=(t.initDataUnsafe.user||{}).first_name||''}</script></body></html>"""
+
+@app.route("/app/<secret>")
+def miniapp_serve(secret):
+    b = q1("SELECT id FROM bots WHERE miniapp_secret=? AND miniapp_secret<>''", (secret,))
+    if not b: abort(404)
+    p = os.path.join(bot_dir(b["id"]), "miniapp.html")
+    if not os.path.exists(p): abort(404)
+    return Response(open(p, encoding="utf-8").read(), mimetype="text/html")
+
+# ---- commands: edit / bulk delete / syntax check / search / replace
 @app.route("/bots/<int:bid>/cmd", methods=["GET", "POST"])
 def cmd_edit(bid):
-    b = _bot_or_404(bid); name = request.values.get("name", ""); cmds = get_cmds(bid); msg = ""
+    c = bot_ctx(bid, "commands"); name = request.values.get("name", ""); cmds = get_cmds(bid); msg = ""
     if request.method == "POST":
         newname = request.form.get("newname", "").strip(); code = request.form.get("code", "").replace("\r\n", "\n")
         if request.form.get("do") == "delete":
-            apply_cmd_change(bid, name, None); flash("Deleted %s" % name); return redirect("/bots/%d" % bid)
+            apply_cmd_change(bid, name, None); flash("Deleted %s" % name); return redirect("/bots/%d/commands" % bid)
         if not newname: msg = "Name is required"
         else:
             try: compile(code, "<tpy>", "exec")
-            except SyntaxError as e: msg = "Syntax error line %s: %s" % (e.lineno, e.msg)
+            except SyntaxError as e: msg = "Syntax error on line %s: %s" % (e.lineno, e.msg); c["synline"] = e.lineno
             if not msg:
                 if name and newname != name: apply_cmd_change(bid, name, None)
                 apply_cmd_change(bid, newname, code)
-                flash("Saved %s%s" % (newname, " (live)" if runner(bid).alive else ""))
-                return redirect("/bots/%d/cmd?name=%s" % (bid, requests.utils.quote(newname, safe="")))
-        return render_template("cmd.html", b=b, name=name, newname=newname, code=code, msg=msg, isnew=not name)
-    return render_template("cmd.html", b=b, name=name, newname=name, code=cmds.get(name, ""), msg="", isnew=not name)
+                flash("Saved %s%s" % (newname, " — live on the running bot" if runner(bid).alive else ""))
+                return redirect("/bots/%d/cmd?name=%s" % (bid, f_uq(newname)))
+        c.update(name=name, newname=newname, code=code, msg=msg, isnew=not name)
+    else: c.update(name=name, newname=name, code=cmds.get(name, ""), msg="", isnew=not name)
+    errs = [e for e in get_errors(bid, 60) if e["command"] == (c["name"] or c.get("newname"))][:1]
+    c["lasterr"] = errs[0] if errs else None
+    return render_template("cmd.html", **c)
 
+@app.route("/bots/<int:bid>/cmds/delete", methods=["POST"])
+def cmds_delete(bid):
+    _bot_or_404(bid); names = request.form.getlist("names")
+    bulk_update(bid, {n: None for n in names}); flash("Deleted %d command(s)" % len(names)); return redirect("/bots/%d/commands" % bid)
+
+@app.route("/bots/<int:bid>/check.json")
+def cmds_check(bid):
+    _bot_or_404(bid); bad = []
+    for n, code in get_cmds(bid).items():
+        try: compile(code, "<tpy %s>" % n, "exec")
+        except SyntaxError as e: bad.append({"name": n, "line": e.lineno, "msg": e.msg})
+    return jsonify(total=len(get_cmds(bid)), bad=bad)
+
+def _pattern(qs, case, word, regex):
+    pat = qs if regex else re.escape(qs)
+    if word: pat = r"\b(?:%s)\b" % pat
+    return re.compile(pat, 0 if case else re.I)
+
+@app.route("/bots/<int:bid>/search.json")
+def cmds_search(bid):
+    _bot_or_404(bid); qs = request.args.get("q", "")
+    if not qs: return jsonify(results=[], total=0)
+    try: pat = _pattern(qs, request.args.get("case") == "1", request.args.get("word") == "1", request.args.get("regex") == "1")
+    except re.error as e: return jsonify(error="Invalid regex: %s" % e)
+    out = []; total = 0
+    for n, code in sorted(get_cmds(bid).items()):
+        cnt = len(pat.findall(code))
+        if not cnt: continue
+        total += cnt; lines = []
+        for i, l in enumerate(code.split("\n"), 1):
+            if pat.search(l):
+                lines.append({"n": i, "t": l.strip()[:160]})
+                if len(lines) >= 4: break
+        out.append({"name": n, "count": cnt, "lines": lines})
+        if len(out) >= 200: break
+    return jsonify(results=out, total=total)
+
+@app.route("/bots/<int:bid>/replace", methods=["POST"])
+def cmds_replace(bid):
+    _bot_or_404(bid); qs = request.form.get("q", ""); repl = request.form.get("repl", ""); regex = request.form.get("regex") == "1"
+    if not qs: return jsonify(error="Type something to search first")
+    try: pat = _pattern(qs, request.form.get("case") == "1", request.form.get("word") == "1", regex)
+    except re.error as e: return jsonify(error="Invalid regex: %s" % e)
+    changes = {}; broken = []; n = 0
+    for name, code in get_cmds(bid).items():
+        cnt = len(pat.findall(code))
+        if not cnt: continue
+        try: new = pat.sub(repl if regex else (lambda m: repl), code)
+        except re.error as e: return jsonify(error="Bad replacement: %s" % e)
+        try: compile(new, "<tpy>", "exec")
+        except SyntaxError:
+            try: compile(code, "<tpy>", "exec"); broken.append(name); continue     # replacement would break a working command: skip it
+            except SyntaxError: pass
+        changes[name] = new; n += cnt
+    if changes: bulk_update(bid, changes)
+    return jsonify(replaced=n, commands=len(changes), skipped=broken)
+
+# ---- import / export
 @app.route("/bots/<int:bid>/import", methods=["POST"])
 def cmd_import(bid):
     _bot_or_404(bid); f = request.files.get("file"); txt = request.form.get("text", "")
     if f and f.filename: txt = f.read().decode("utf-8", "replace")
-    new = parse_commands_text(txt)
-    if not new: flash("No commands found. Use blocks like:  === /start ===  then the code."); return redirect("/bots/%d" % bid)
-    n = replace_cmds(bid, new, request.form.get("mode") == "merge")
-    flash("Imported %d commands (bot now has %d)." % (len(new), n)); return redirect("/bots/%d" % bid)
+    cmds, data = parse_any(txt)
+    if not cmds and not data: flash("Nothing found in that file. Send me a sample and I will add support for its format."); return redirect("/bots/%d/manage" % bid)
+    n, nd = import_into(bid, cmds, data, request.form.get("mode") == "merge", request.form.get("with_data") == "1")
+    flash("Imported %d commands%s (bot now has %d)." % (len(cmds), (" and %d data keys" % nd) if nd else "", n)); return redirect("/bots/%d/commands" % bid)
 
-@app.route("/bots/<int:bid>/export")
-def cmd_export(bid):
-    _bot_or_404(bid); cmds = get_cmds(bid)
-    body = "\n".join("=== %s ===\n%s\n" % (k, v) for k, v in sorted(cmds.items()))
+@app.route("/bots/<int:bid>/export.json")
+def export_json(bid):
+    _bot_or_404(bid); b = q1("SELECT username FROM bots WHERE id=?", (bid,))
+    o = bot_export_obj(bid, request.args.get("data") == "1", request.args.get("users") == "1")
+    return Response(json.dumps(o, ensure_ascii=False, indent=1), mimetype="application/json", headers={"Content-Disposition": "attachment; filename=%s_%d.json" % (b["username"] or "bot", bid)})
+
+@app.route("/bots/<int:bid>/export.txt")
+def export_txt(bid):
+    _bot_or_404(bid)
+    body = "\n".join("=== %s ===\n%s\n" % (k, v) for k, v in sorted(get_cmds(bid).items()))
     return Response(body, mimetype="text/plain", headers={"Content-Disposition": "attachment; filename=bot_%d_commands.txt" % bid})
 
-@app.route("/bots/<int:bid>/logs")
-def logs(bid):
-    b = _bot_or_404(bid); r = RUNNERS.get(bid)
-    lines = list(r.mod.LOGBUF)[-300:] if (r and r.mod) else []
-    return render_template("logs.html", b=b, lines=reversed(lines), err=r.err if r else "")
+# ---- errors
+@app.route("/bots/<int:bid>/errors", methods=["GET", "POST"])
+def bot_errors(bid):
+    c = bot_ctx(bid, "intro")
+    if request.method == "POST":
+        if os.path.exists(db_file(bid)): d = dbc(bid); d.execute("DELETE FROM errors"); d.commit(); d.close()
+        _cache.pop(("ec", bid), None); flash("Errors cleared"); return redirect("/bots/%d/errors" % bid)
+    return render_template("bot_errors.html", errors=get_errors(bid, 100), **c)
 
-def dbc(bid):
-    c = sqlite3.connect(db_file(bid), timeout=30); c.execute("PRAGMA journal_mode=WAL"); return c
-
-@app.route("/bots/<int:bid>/data")
-def data_list(bid):
-    b = _bot_or_404(bid); qs = request.args.get("q", "").strip()
+@app.route("/errors")
+def all_errors():
     rows = []
-    if os.path.exists(db_file(bid)):
-        c = dbc(bid)
-        try:
-            rows = c.execute("SELECT name, substr(value,1,90), length(value) FROM bot_data WHERE name LIKE ? ORDER BY name LIMIT 300", ("%" + qs + "%",)).fetchall()
-            counts = c.execute("SELECT (SELECT COUNT(*) FROM bot_data),(SELECT COUNT(*) FROM user_data),(SELECT COUNT(*) FROM users)").fetchone()
-        except Exception: counts = (0, 0, 0)
-        c.close()
-    else: counts = (0, 0, 0)
-    return render_template("data.html", b=b, rows=rows, qs=qs, counts=counts)
+    for b in q("SELECT id,name,username FROM bots"):
+        for e in get_errors(b["id"], 15): e["bot"] = b; rows.append(e)
+    rows.sort(key=lambda e: -e["ts"]); return render_template("errors.html", errors=rows[:100], nav="errors")
+
+# ---- admin tab
+ADMIN_SUBS = [("analytics", "Analytics"), ("users", "Users"), ("broadcasts", "Broadcasts"), ("data", "Bot Data")]
+@app.route("/bots/<int:bid>/admin/<sub>")
+def bot_admin(bid, sub):
+    if sub not in [s[0] for s in ADMIN_SUBS]: abort(404)
+    c = bot_ctx(bid, "admin"); c.update(sub=sub, subs=ADMIN_SUBS); cmds = get_cmds(bid)
+    if sub == "analytics":
+        rows = sorted(((n, code.count("\n") + 1) for n, code in cmds.items()), key=lambda r: -r[1])
+        c.update(s=user_stats(bid), rows=rows[:60], mx=(rows[0][1] if rows else 1), ncmds=len(cmds))
+    elif sub == "users":
+        page = max(1, int(request.args.get("page", 1))); qs = request.args.get("q", "").strip(); rows = []; tot = 0
+        if os.path.exists(db_file(bid)):
+            d = dbc(bid); tot = d.execute("SELECT COUNT(*) FROM users WHERE user LIKE ?", ("%" + qs + "%",)).fetchone()[0]
+            rows = d.execute("SELECT user,first_seen,last_seen,COALESCE(blocked,0) FROM users WHERE user LIKE ? ORDER BY last_seen DESC LIMIT 40 OFFSET ?", ("%" + qs + "%", (page - 1) * 40)).fetchall(); d.close()
+        c.update(rows=rows, tot=tot, page=page, qs=qs, pages=max(1, (tot + 39) // 40))
+    elif sub == "broadcasts":
+        r = RUNNERS.get(bid); rows = []
+        if os.path.exists(db_file(bid)):
+            d = dbc(bid); rows = d.execute("SELECT id,ts,text,total,ok,err,status FROM broadcasts ORDER BY ts DESC LIMIT 15").fetchall(); d.close()
+        c.update(rows=rows, running=bool(r and r.alive and r.mod and r.mod.BOT_INFO.get("bot_id")), s=user_stats(bid))
+    elif sub == "data":
+        qs = request.args.get("q", "").strip(); rows = []; counts = (0, 0, 0)
+        if os.path.exists(db_file(bid)):
+            d = dbc(bid)
+            rows = d.execute("SELECT name, substr(value,1,90), length(value) FROM bot_data WHERE name LIKE ? ORDER BY name LIMIT 300", ("%" + qs + "%",)).fetchall()
+            counts = d.execute("SELECT (SELECT COUNT(*) FROM bot_data),(SELECT COUNT(*) FROM user_data),(SELECT COUNT(*) FROM users)").fetchone(); d.close()
+        c.update(rows=rows, qs=qs, counts=counts)
+    return render_template("admin_%s.html" % sub, **c)
+
+@app.route("/bots/<int:bid>/user/<uid>", methods=["GET", "POST"])
+def bot_user(bid, uid):
+    c = bot_ctx(bid, "admin"); c.update(sub="users", subs=ADMIN_SUBS); d = dbc(bid)
+    if request.method == "POST":
+        if request.form.get("do") == "res":
+            d.execute("INSERT OR REPLACE INTO res VALUES('user',?,?,?)", (uid, request.form.get("name", ""), float(request.form.get("value") or 0)))
+        elif request.form.get("do") == "block":
+            d.execute("UPDATE users SET blocked=1-COALESCE(blocked,0) WHERE user=?", (uid,))
+        d.commit(); d.close(); _cache.pop(("us", bid), None); return redirect("/bots/%d/user/%s" % (bid, uid))
+    u = d.execute("SELECT user,first_seen,last_seen,COALESCE(blocked,0) FROM users WHERE user=?", (uid,)).fetchone()
+    kv = d.execute("SELECT name, substr(value,1,160) FROM user_data WHERE user=? ORDER BY name", (uid,)).fetchall()
+    res = d.execute("SELECT name,value FROM res WHERE scope='user' AND user=? ORDER BY name", (uid,)).fetchall(); d.close()
+    if not u: abort(404)
+    c.update(u=u, kv=kv, res=res); return render_template("admin_user.html", **c)
+
+@app.route("/bots/<int:bid>/broadcast", methods=["POST"])
+def bot_broadcast(bid):
+    _bot_or_404(bid); r = RUNNERS.get(bid); text = request.form.get("text", "").strip()
+    if not (r and r.alive and r.mod and r.mod.BOT_INFO.get("bot_id")): flash("Start the bot first."); return redirect("/bots/%d/admin/broadcasts" % bid)
+    if not text: flash("Write a message first."); return redirect("/bots/%d/admin/broadcasts" % bid)
+    markup = None
+    if request.form.get("btn_text") and request.form.get("btn_url"):
+        markup = {"inline_keyboard": [[{"text": request.form["btn_text"], "url": request.form["btn_url"]}]]}
+    days = request.form.get("days"); bcid = r.mod.start_broadcast(text, request.form.get("parse_mode") or "HTML", int(days) if days and days.isdigit() else None, markup)
+    flash("Broadcast started (%s)." % bcid); return redirect("/bots/%d/admin/broadcasts" % bid)
+
+@app.route("/bots/<int:bid>/broadcast/<bcid>.json")
+def bot_broadcast_status(bid, bcid):
+    r = RUNNERS.get(bid)
+    if r and r.mod and bcid in r.mod.BROADCASTS: return jsonify({k: v for k, v in r.mod.BROADCASTS[bcid].items()})
+    return jsonify(status="unknown")
 
 @app.route("/bots/<int:bid>/data/edit", methods=["GET", "POST"])
 def data_edit(bid):
-    b = _bot_or_404(bid); key = request.values.get("key", ""); msg = ""
-    if not os.path.exists(db_file(bid)): flash("Start the bot once to create its database."); return redirect("/bots/%d/data" % bid)
-    c = dbc(bid)
+    c = bot_ctx(bid, "admin"); c.update(sub="data", subs=ADMIN_SUBS); key = request.values.get("key", ""); msg = ""; d = dbc(bid)
     if request.method == "POST":
         if request.form.get("do") == "delete":
-            c.execute("DELETE FROM bot_data WHERE name=?", (key,)); c.commit(); c.close(); flash("Deleted"); return redirect("/bots/%d/data" % bid)
+            d.execute("DELETE FROM bot_data WHERE name=?", (key,)); d.commit(); d.close(); flash("Deleted"); return redirect("/bots/%d/admin/data" % bid)
         newkey = request.form.get("newkey", "").strip(); val = request.form.get("value", "")
         try: json.loads(val)
         except Exception: msg = "Value must be valid JSON (strings need quotes, e.g. \"abc\")"
         if not msg and newkey:
-            c.execute("INSERT OR REPLACE INTO bot_data VALUES(?,?)", (newkey, val)); c.commit(); c.close()
-            flash("Saved %s" % newkey); return redirect("/bots/%d/data/edit?key=%s" % (bid, requests.utils.quote(newkey, safe="")))
-        c.close(); return render_template("dataedit.html", b=b, key=key, newkey=newkey, value=val, msg=msg)
-    r = c.execute("SELECT value FROM bot_data WHERE name=?", (key,)).fetchone(); c.close()
-    val = r[0] if r else ""
+            d.execute("INSERT OR REPLACE INTO bot_data VALUES(?,?)", (newkey, val)); d.commit(); d.close()
+            flash("Saved %s" % newkey); return redirect("/bots/%d/data/edit?key=%s" % (bid, f_uq(newkey)))
+        d.close(); c.update(key=key, newkey=newkey, value=val, msg=msg); return render_template("admin_dataedit.html", **c)
+    r = d.execute("SELECT value FROM bot_data WHERE name=?", (key,)).fetchone(); d.close(); val = r[0] if r else ""
     try: val = json.dumps(json.loads(val), indent=2, ensure_ascii=False)
     except Exception: pass
-    return render_template("dataedit.html", b=b, key=key, newkey=key, value=val, msg="")
+    c.update(key=key, newkey=key, value=val, msg=""); return render_template("admin_dataedit.html", **c)
 
 @app.route("/bots/<int:bid>/data/import", methods=["POST"])
 def data_import(bid):
     _bot_or_404(bid); f = request.files.get("file"); txt = request.form.get("text", "")
     if f and f.filename: txt = f.read().decode("utf-8", "replace")
-    try: d = json.loads(txt); assert isinstance(d, dict)
-    except Exception: flash("Need a JSON object like {\"key\": value, ...}"); return redirect("/bots/%d/data" % bid)
-    if not os.path.exists(db_file(bid)): flash("Start the bot once first (creates its database)."); return redirect("/bots/%d/data" % bid)
-    c = dbc(bid)
-    for k, v in d.items(): c.execute("INSERT OR REPLACE INTO bot_data VALUES(?,?)", (str(k), json.dumps(v, ensure_ascii=False)))
-    c.commit(); c.close(); flash("Imported %d keys. Restart the bot to be safe." % len(d)); return redirect("/bots/%d/data" % bid)
+    try:
+        o = json.loads(txt); assert isinstance(o, dict); o = extract_data(o) or o
+    except Exception: flash("Need a JSON object like {\"key\": value, ...}"); return redirect("/bots/%d/admin/data" % bid)
+    _, nd = import_into(bid, {}, o, True); flash("Imported %d keys. Restart the bot to be safe." % nd); return redirect("/bots/%d/admin/data" % bid)
+
+@app.route("/bots/<int:bid>/data/export.json")
+def data_export(bid):
+    _bot_or_404(bid); d = dbc(bid); o = {k: _dec(v) for k, v in d.execute("SELECT name,value FROM bot_data").fetchall()}; d.close()
+    return Response(json.dumps(o, ensure_ascii=False, indent=1), mimetype="application/json", headers={"Content-Disposition": "attachment; filename=bot_%d_data.json" % bid})
+
+# ---- more / settings (panel level)
+@app.route("/more")
+def more(): return render_template("more.html", nav="more")
+
+@app.route("/settings", methods=["GET", "POST"])
+def panel_settings():
+    if request.method == "POST":
+        do = request.form.get("do")
+        if do == "password":
+            if not check_pw(request.form.get("old", "")): flash("Current password is wrong")
+            elif len(request.form.get("new", "")) < 8: flash("New password must be at least 8 characters")
+            else: set_setting("pw_hash", _hash_pw(request.form["new"])); flash("Password changed")
+        elif do == "general":
+            set_setting("error_chat", request.form.get("error_chat", "").strip()); set_setting("title", request.form.get("title", "").strip()); flash("Saved")
+        return redirect("/settings")
+    return render_template("settings.html", nav="settings", error_chat=setting("error_chat"), title=setting("title"), port=PORT, public=PUBLIC_URL,
+                           pwgen=PW_GENERATED and not setting("pw_hash"))
+
+@app.route("/backup.zip")
+def backup():
+    import zipfile
+    buf = io.BytesIO(); z = zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED)
+    for root, _, files in os.walk(DATA_DIR):
+        for fn in files:
+            if fn.endswith(("-wal", "-shm", ".tmp", ".key")) or fn == "panel_password.txt": continue
+            p = os.path.join(root, fn); z.write(p, os.path.relpath(p, DATA_DIR))
+    z.close(); buf.seek(0)
+    return Response(buf.read(), mimetype="application/zip", headers={"Content-Disposition": "attachment; filename=panel_backup.zip"})
 
 @app.route("/wh/<secret>/<path:command>/<uid>", methods=["GET", "POST"], strict_slashes=False)
 def webhook(secret, command, uid):
@@ -445,111 +863,6 @@ def webhook(secret, command, uid):
     if not r or not r.alive or not r.mod: abort(404)
     body = r.mod.handle_webhook(command, uid, request.get_data(as_text=True), request.query_string.decode())
     return Response(body, mimetype="application/json")
-
-# ------------------------------------------------------------------ templates
-CSS = """
-:root{--bg:#0b0b0f;--card:#14141b;--bd:#262633;--tx:#ececf3;--mu:#8b8ba0;--ac:#7c5cff;--gr:#34d27b;--rd:#ff5b6e;--yl:#f5b942}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.45 system-ui,Segoe UI,Roboto,sans-serif}
-a{color:#a99bff;text-decoration:none}.wrap{max-width:980px;margin:0 auto;padding:14px 14px 90px}
-nav{position:sticky;top:0;background:#0b0b0fee;backdrop-filter:blur(8px);border-bottom:1px solid var(--bd);z-index:5}
-nav .in{max-width:980px;margin:0 auto;padding:10px 14px;display:flex;gap:16px;align-items:center}
-nav b{font-size:17px}nav a{color:var(--mu)}nav a.on{color:var(--tx)}nav form{margin-left:auto}
-.card{background:var(--card);border:1px solid var(--bd);border-radius:14px;padding:14px;margin:12px 0}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
-.stat{background:var(--card);border:1px solid var(--bd);border-radius:14px;padding:12px 14px}
-.stat small{color:var(--mu);display:block}.stat b{font-size:24px}
-h1,h2{margin:.5em 0}h1{font-size:24px}h2{font-size:13px;letter-spacing:.08em;color:var(--mu);text-transform:uppercase}
-input,select,textarea,button{font:inherit;color:var(--tx);background:#0f0f15;border:1px solid var(--bd);border-radius:10px;padding:9px 11px}
-input,select,textarea{width:100%}textarea{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;line-height:1.4}
-button,.btn{background:var(--ac);border:0;color:#fff;cursor:pointer;padding:9px 14px;border-radius:10px;display:inline-block}
-button.g,.btn.g{background:#22222e;color:var(--tx)}button.r{background:#4a1f27;color:#ff9aa8}button.s{padding:5px 10px;font-size:13px}
-.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.row>*{flex:0 0 auto}.grow{flex:1!important}
-.bot{display:flex;gap:10px;align-items:center;padding:12px 0;border-top:1px solid var(--bd)}.bot:first-child{border:0}
-.dot{width:10px;height:10px;border-radius:50%;background:#555;flex:none}.running .dot{background:var(--gr)}.error .dot{background:var(--rd)}.starting .dot,.stopping .dot{background:var(--yl)}
-.mu{color:var(--mu)}.pill{background:#1e1e2a;border-radius:99px;padding:2px 10px;font-size:12px;color:var(--mu)}
-.flash{background:#1d2a22;border:1px solid #2c5a3f;color:#9be5b8;padding:10px 12px;border-radius:10px;margin:10px 0}
-.err{background:#2a1a1e;border:1px solid #5a2c35;color:#ff9aa8;padding:10px 12px;border-radius:10px;margin:10px 0;white-space:pre-wrap}
-pre{white-space:pre-wrap;word-break:break-word;font-size:12px;background:#0f0f15;border:1px solid var(--bd);border-radius:10px;padding:10px;margin:6px 0}
-.cmd{display:flex;justify-content:space-between;padding:9px 0;border-top:1px solid var(--bd);gap:8px}.cmd:first-child{border:0}
-code{background:#1e1e2a;padding:1px 6px;border-radius:6px}svg text{fill:#8b8ba0;font-size:10px}
-@media(max-width:560px){nav .in{gap:10px}}
-"""
-BASE = """<!doctype html><html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">
-<title>{% block title %}TBC-Lite{% endblock %}</title><style>""" + CSS + """</style></head><body>
-{% if session.ok %}<nav><div class=in><b>⚡ TBC-Lite</b><a href="/" class="{{ 'on' if request.path=='/' }}">Home</a>
-<a href="/bots" class="{{ 'on' if request.path.startswith('/bots') }}">Bots</a>
-<form method=post action=/logout><input type=hidden name=csrf value="{{csrf}}"><button class="g s">Logout</button></form></div></nav>{% endif %}
-<div class=wrap>{% for m in get_flashed_messages() %}<div class=flash>{{m}}</div>{% endfor %}{% block body %}{% endblock %}</div></body></html>"""
-
-TEMPLATES = {
-"base.html": BASE,
-"login.html": """{% extends 'base.html' %}{% block body %}<div class=card style="max-width:360px;margin:12vh auto"><h1>⚡ TBC-Lite</h1>
-{% if err %}<div class=err>{{err}}</div>{% endif %}<form method=post><p><input type=password name=password placeholder="Panel password" autofocus></p>
-<button style="width:100%">Login</button></form></div>{% endblock %}""",
-"dashboard.html": """{% extends 'base.html' %}{% block body %}<h1>Dashboard</h1>
-<div class=grid><div class=stat><small>Total bots</small><b>{{total}}</b></div><div class=stat><small>Running</small><b style="color:var(--gr)">{{running}}</b></div>
-<div class=stat><small>Total users</small><b>{{users}}</b></div><div class=stat><small>Active 24h</small><b>{{active}}</b></div>
-<div class=stat><small>Commands run (since start)</small><b>{{cmds_run}}</b></div><div class=stat><small>Command errors</small><b style="color:{{ 'var(--rd)' if errs else 'inherit' }}">{{errs}}</b></div></div>
-{% if errbots %}<div class=err>Bots with startup errors: {% for b in errbots %}<a href="/bots/{{b.id}}">#{{b.id}} {{b.name}}</a> ({{b.err}}) {% endfor %}</div>{% endif %}
-<h2>Activity (updates / hour, last 24h)</h2><div class=card><svg viewBox="0 0 480 110" width=100%>
-{% for v in series %}{% set h = (v / mx * 80) %}<rect x="{{ loop.index0 * 20 + 2 }}" y="{{ 90 - h }}" width=16 height="{{ h if h > 0.5 else 0.5 }}" rx=3 fill="#7c5cff"/>{% endfor %}
-<text x=2 y=105>24h ago</text><text x=430 y=105>now</text><text x=2 y=10>peak {{mx if mx>1 else 0}}</text></svg></div>
-<h2>Most users</h2><div class=card>{% for b in top %}<div class=bot><a class=grow href="/bots/{{b.id}}"><b>{{b.name}}</b> <span class=mu>@{{b.username}}</span></a><span class=pill>{{b.users}} users</span></div>{% else %}<span class=mu>No bots yet — add one in Bots.</span>{% endfor %}</div>{% endblock %}""",
-"bots.html": """{% extends 'base.html' %}{% block body %}<h1>My Bots <span class=pill>{{all_bots|length}}</span></h1>
-<form class=row method=get><input class=grow name=q value="{{qs}}" placeholder="Search name / @username / id"><select name=f style="width:auto"><option value="">All</option>
-{% for s in ['running','stopped','error'] %}<option {{'selected' if flt==s}}>{{s}}</option>{% endfor %}</select><button class=g>Filter</button></form>
-<div class=card>{% for b in bots %}<div class="bot {{b.state}}"><span class=dot></span><a class=grow href="/bots/{{b.id}}"><b>{{b.name}}</b><br><span class=mu>@{{b.username}} · #{{b.id}} · {{b.cmds}} cmds</span>
-{% if b.err %}<br><span style="color:var(--rd);font-size:12px">{{b.err}}</span>{% endif %}</a><span class=pill>{{b.users}} users</span>
-<form method=post action="/bots/{{b.id}}/action"><input type=hidden name=csrf value="{{csrf}}"><input type=hidden name=next value="/bots">
-{% if b.state in ['running','starting'] %}<button class="g s" name=action value=stop>Stop</button>{% else %}<button class="s" name=action value=start>Start</button>{% endif %}</form></div>
-{% else %}<span class=mu>No bots.</span>{% endfor %}</div>
-<h2>Add bots</h2><form method=post action=/bots/add class=card><p class=mu style="margin-top:0">Paste one or many BotFather tokens (one per line).</p>
-<textarea name=tokens rows=4 placeholder="123456:ABC-DEF...&#10;987654:XYZ..."></textarea>
-<p><select name=copy_from><option value="">Start with no commands</option>{% for b in all_bots %}<option value="{{b.id}}">Copy commands from #{{b.id}} {{b.name}} ({{b.cmds}})</option>{% endfor %}</select></p>
-<p><label><input type=checkbox name=start value=1 style="width:auto"> Start right after adding</label></p>
-<input type=hidden name=csrf value="{{csrf}}"><button>Add</button></form>
-<h2>Bulk import commands (ZIP)</h2><form method=post action=/bots/import-zip enctype=multipart/form-data class=card>
-<p class=mu style="margin-top:0">A .zip with one file per bot. Each file name must contain the bot's <code>@username</code> (e.g. <code>My_bot.txt</code>). Matches bots already added above.</p>
-<p><input type=file name=file accept=".zip"></p><p class=row><select name=mode style="width:auto"><option value=replace>Replace commands</option><option value=merge>Merge</option></select>
-<input type=hidden name=csrf value="{{csrf}}"><button>Import ZIP</button></p></form>{% endblock %}""",
-"bot.html": """{% extends 'base.html' %}{% block body %}<p><a href="/bots">← Bots</a></p>
-<div class="row {{state}}"><span class=dot style="width:12px;height:12px"></span><h1 class=grow style="margin:0">{{b.name}}</h1><span class=pill>{{state}}</span></div>
-<p class=mu><a href="https://t.me/{{b.username}}" target=_blank>@{{b.username}}</a> · id #{{b.id}} · {{users}} users ({{active}} active 24h) · {{st.commands}} cmds run · {{st.errors}} errors</p>
-{% if err %}<div class=err>{{err}}</div>{% endif %}
-<form method=post action="/bots/{{b.id}}/action" class=row><input type=hidden name=csrf value="{{csrf}}">
-<button name=action value=start>Start</button><button class=g name=action value=restart>Restart</button><button class=g name=action value=stop>Stop</button>
-<a class="btn g" href="/bots/{{b.id}}/logs">Logs</a><a class="btn g" href="/bots/{{b.id}}/data">Data</a><a class="btn g" href="/bots/{{b.id}}/export">Export</a></form>
-<h2>Commands ({{ncmds}})</h2><div class=card><form class=row method=get><input class=grow name=q value="{{qs}}" placeholder="Search commands"><button class=g>Search</button>
-<a class=btn href="/bots/{{b.id}}/cmd">+ New</a></form>
-{% for n in names %}<div class=cmd><a href="/bots/{{b.id}}/cmd?name={{n|urlencode}}"><code>{{n}}</code></a><span class=mu>{{size(n)}} chars</span></div>{% endfor %}</div>
-<h2>Import commands</h2><form method=post action="/bots/{{b.id}}/import" enctype=multipart/form-data class=card>
-<p class=mu style="margin-top:0">Upload the commands .txt exported from TBC (blocks like <code>=== /start ===</code>) — or paste it.</p>
-<p><input type=file name=file></p><p><textarea name=text rows=3 placeholder="…or paste here"></textarea></p>
-<p class=row><select name=mode style="width:auto"><option value=replace>Replace all commands</option><option value=merge>Merge (overwrite same names)</option></select>
-<input type=hidden name=csrf value="{{csrf}}"><button>Import</button></p></form>
-<h2>Danger</h2><form method=post action="/bots/{{b.id}}/action" class="card row" onsubmit="return confirm('Delete this bot from the panel?')"><input type=hidden name=csrf value="{{csrf}}">
-<label class=mu><input type=checkbox name=purge value=1 style="width:auto"> also delete its commands &amp; data</label><button class=r name=action value=delete>Delete bot</button></form>{% endblock %}""",
-"cmd.html": """{% extends 'base.html' %}{% block body %}<p><a href="/bots/{{b.id}}">← {{b.name}}</a></p><h1>{{ 'New command' if isnew else name }}</h1>
-{% if msg %}<div class=err>{{msg}}</div>{% endif %}<form method=post class=card><input type=hidden name=csrf value="{{csrf}}"><input type=hidden name=name value="{{name}}">
-<p><input name=newname value="{{newname}}" placeholder="/command name (or button text)"></p><p><textarea name=code rows=26 spellcheck=false>{{code}}</textarea></p>
-<p class=row><button>Save{% if not isnew %} (applies live){% endif %}</button>{% if not isnew %}<button class=r name=do value=delete onclick="return confirm('Delete command?')">Delete</button>{% endif %}</p></form>{% endblock %}""",
-"logs.html": """{% extends 'base.html' %}{% block body %}<p><a href="/bots/{{b.id}}">← {{b.name}}</a></p><h1>Logs</h1>
-{% if err %}<div class=err>{{err}}</div>{% endif %}<p class=mu>Newest first · <a href="">refresh</a></p>
-{% for l in lines %}<pre>{{l}}</pre>{% else %}<span class=mu>No log lines yet.</span>{% endfor %}{% endblock %}""",
-"data.html": """{% extends 'base.html' %}{% block body %}<p><a href="/bots/{{b.id}}">← {{b.name}}</a></p><h1>Data</h1>
-<p class=mu>{{counts[0]}} bot keys · {{counts[1]}} user keys · {{counts[2]}} users</p>
-<form class=row method=get><input class=grow name=q value="{{qs}}" placeholder="Search bot data keys"><button class=g>Search</button><a class=btn href="/bots/{{b.id}}/data/edit">+ New key</a></form>
-<div class=card>{% for r in rows %}<div class=cmd><a href="/bots/{{b.id}}/data/edit?key={{r[0]|urlencode}}"><code>{{r[0]}}</code></a><span class=mu style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:50%">{{r[1]}}</span></div>{% else %}<span class=mu>No keys.</span>{% endfor %}</div>
-<h2>Import data (JSON)</h2><form method=post action="/bots/{{b.id}}/data/import" enctype=multipart/form-data class=card>
-<p class=mu style="margin-top:0">A JSON object <code>{"key": value}</code> — each key goes into Bot data (e.g. admins, settings).</p>
-<p><input type=file name=file></p><p><textarea name=text rows=3></textarea></p><input type=hidden name=csrf value="{{csrf}}"><button>Import</button></form>{% endblock %}""",
-"dataedit.html": """{% extends 'base.html' %}{% block body %}<p><a href="/bots/{{b.id}}/data">← Data</a></p><h1>{{ key or 'New key' }}</h1>
-{% if msg %}<div class=err>{{msg}}</div>{% endif %}<form method=post class=card><input type=hidden name=csrf value="{{csrf}}"><input type=hidden name=key value="{{key}}">
-<p><input name=newkey value="{{newkey}}" placeholder="key name"></p><p><textarea name=value rows=14 spellcheck=false>{{value}}</textarea></p>
-<p class=row><button>Save</button>{% if key %}<button class=r name=do value=delete onclick="return confirm('Delete key?')">Delete</button>{% endif %}</p></form>{% endblock %}""",
-}
-app.jinja_loader = DictLoader(TEMPLATES)
-app.jinja_env.filters["urlencode"] = lambda s: requests.utils.quote(str(s), safe="")
 
 def autostart():
     rows = q("SELECT id,token FROM bots WHERE enabled=1 ORDER BY id")
@@ -561,11 +874,12 @@ def autostart():
 
 def main():
     threading.Thread(target=autostart, daemon=True).start()
+    threading.Thread(target=sampler, daemon=True).start()
     print("=" * 60, flush=True)
-    print("TBC-Lite panel starting on %s:%d" % (HOST, PORT), flush=True)
-    if PW_GENERATED:
+    print("Panel starting on %s:%d" % (HOST, PORT), flush=True)
+    if PW_GENERATED and not setting("pw_hash"):
         print("PANEL_PASSWORD was not set -> generated password:  %s" % PASSWORD, flush=True)
-        print("(saved in %s ; set PANEL_PASSWORD to choose your own)" % _PWFILE, flush=True)
+        print("(saved in %s ; set PANEL_PASSWORD or change it in Settings)" % _PWFILE, flush=True)
     print("Open:  http://<your-server-ip>:%d   (health check: /health)" % PORT, flush=True)
     print("=" * 60, flush=True)
     try:

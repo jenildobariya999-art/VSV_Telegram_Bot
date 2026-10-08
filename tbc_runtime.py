@@ -107,8 +107,12 @@ for stmt in [
     "CREATE TABLE IF NOT EXISTS users(user TEXT PRIMARY KEY, first_seen REAL, last_seen REAL)",
     "CREATE TABLE IF NOT EXISTS jobs(id TEXT PRIMARY KEY, run_at REAL, command TEXT, options TEXT, user TEXT, ctx TEXT)",
     "CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT)",
+    "CREATE TABLE IF NOT EXISTS errors(id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL, command TEXT, user TEXT, etype TEXT, msg TEXT, line INTEGER, ctx TEXT, tb TEXT)",
+    "CREATE TABLE IF NOT EXISTS broadcasts(id TEXT PRIMARY KEY, ts REAL, text TEXT, total INTEGER, ok INTEGER, err INTEGER, status TEXT)",
 ]:
     _db.execute(stmt)
+try: _db.execute("ALTER TABLE users ADD COLUMN blocked INTEGER DEFAULT 0")
+except Exception: pass
 
 def _enc(v): return json.dumps(v, ensure_ascii=False, default=str)
 def _dec(s):
@@ -235,6 +239,10 @@ def tg(method, **params):
         if j.get("error_code") == 429:
             time.sleep(min(j.get("parameters", {}).get("retry_after", 2), 30)); continue
         log("TELEGRAM ERROR in %s: %s" % (method, desc))
+        if j.get("error_code") == 403 and ("blocked" in desc or "deactivated" in desc) and str(data.get("chat_id", "")).lstrip("-").isdigit():
+            try:
+                with _dblock: _db.execute("UPDATE users SET blocked=1 WHERE user=?", (str(data["chat_id"]),))
+            except Exception: pass
         if j.get("error_code") == 400 and "not modified" not in desc:
             # stage 1: drop custom emoji + button icon/style; stage 2: strip all html tags
             if stage == 0:
@@ -490,6 +498,41 @@ def get_code(name):
         _compiled[name] = compile(COMMANDS[name], "<tpy %s>" % name, "exec")
     return _compiled[name]
 
+_alert_last = {}
+def record_error(name, uid, exc):
+    """store the error (with the exact code line) and optionally alert the owner on Telegram"""
+    STATS["errors"] += 1
+    line = None
+    tb = exc.__traceback__
+    fn = "<tpy %s>" % name
+    while tb:
+        if tb.tb_frame.f_code.co_filename == fn: line = tb.tb_lineno
+        tb = tb.tb_next
+    if isinstance(exc, SyntaxError) and exc.lineno: line = exc.lineno
+    lines = (COMMANDS.get(name) or "").split("\n")
+    ctx = []
+    if line:
+        for i in range(max(1, line - 2), min(len(lines), line + 2) + 1): ctx.append([i, lines[i - 1][:200]])
+    full = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__, limit=-6))
+    try:
+        with _dblock:
+            _db.execute("INSERT INTO errors(ts,command,user,etype,msg,line,ctx,tb) VALUES(?,?,?,?,?,?,?,?)",
+                        (time.time(), name, str(uid), type(exc).__name__, str(exc)[:500], line, json.dumps(ctx), full[-3000:]))
+            _db.execute("DELETE FROM errors WHERE id <= (SELECT MAX(id) FROM errors) - 300")
+    except Exception: pass
+    log("ERROR in command %s line %s (user %s): %s: %s" % (name, line, uid, type(exc).__name__, exc))
+    ec = CFG.get("error_chat")
+    if ec and time.time() - _alert_last.get(name, 0) > 10:
+        _alert_last[name] = time.time()
+        def _send():
+            try:
+                import html as _h
+                tg("sendMessage", chat_id=ec, parse_mode="HTML", text="⚠️ <b>Error in</b> <code>%s</code>%s\n<code>%s: %s</code>%s" % (
+                    _h.escape(name), (" (line %s)" % line) if line else "", type(exc).__name__, _h.escape(str(exc))[:500],
+                    ("\n\n<pre>%s</pre>" % _h.escape("\n".join("%s%d  %s" % (">" if i == line else " ", i, t) for i, t in ctx))) if ctx else ""))
+            except Exception: pass
+        threading.Thread(target=_send, daemon=True).start()
+
 class Ctx:
     def __init__(self, u, message, update_type="message", msg=None, params=None, options=None, cb_id=None):
         self.u, self.message, self.update_type = u, message, update_type
@@ -497,7 +540,10 @@ class Ctx:
 
 _SAFE_MODULES = {}
 def run_command(name, ctx, depth=0):
-    code = get_code(name)
+    try:
+        code = get_code(name)
+    except SyntaxError as e:
+        record_error(name, ctx.u, e); return False
     if code is None:
         log("command not found:", name); return False
     if depth > 25:
@@ -510,9 +556,8 @@ def run_command(name, ctx, depth=0):
         exec(code, g)
     except ReturnCommand:
         pass
-    except Exception:
-        STATS["errors"] += 1
-        log("ERROR in command %s (user %s):\n%s" % (name, ctx.u, traceback.format_exc(limit=6)))
+    except Exception as e:
+        record_error(name, ctx.u, e)
     return True
 
 class _BotHigh(_BotData):
@@ -574,26 +619,52 @@ class _BotHigh(_BotData):
         bid = self.genRandomId()
         threading.Thread(target=_do_broadcast, args=(bid, func, users, kwargs, callback_url), daemon=True).start()
         return {"status": "success", "broadcast_id": bid, "total": len(users)}
-    def getBroadcastStatus(self, bid): return {"status": "unknown"}
-    def stopBroadcast(self, bid): return {"status": "unsupported"}
+    def getBroadcastStatus(self, bid):
+        st = BROADCASTS.get(bid)
+        return dict(st) if st else {"status": "unknown"}
+    def stopBroadcast(self, bid):
+        if bid in BROADCASTS: BROADCASTS[bid]["cancel"] = True; return {"status": "success"}
+        return {"status": "unknown"}
     def clearBroadcast(self, *a, **k): return {"status": "success"}
 
-def _do_broadcast(bid, func, users, kwargs, callback_url):
-    ok = err = 0
-    for uid in users:
+BROADCASTS = {}
+def _do_broadcast(bid, func, users, kwargs, callback_url=None, text=""):
+    st = BROADCASTS[bid] = {"id": bid, "status": "running", "total": len(users), "ok": 0, "err": 0, "ts": time.time()}
+    with _dblock:
+        _db.execute("INSERT OR REPLACE INTO broadcasts VALUES(?,?,?,?,?,?,?)", (bid, st["ts"], (text or str(kwargs.get("text", "")))[:500], len(users), 0, 0, "running"))
+    for n, uid in enumerate(users, 1):
+        if STOP.is_set(): st["status"] = "stopped"; break
+        if st.get("cancel"): st["status"] = "cancelled"; break
         try:
             kw = dict(kwargs); kw["chat_id"] = uid
-            tg(func, **kw); ok += 1
+            tg(func, **kw); st["ok"] += 1
         except Exception:
-            err += 1
-        time.sleep(0.05)   # ~20 msgs/sec, under Telegram's 30/sec limit
-    log("broadcast %s done ok=%d err=%d" % (bid, ok, err))
+            st["err"] += 1
+        if n % 25 == 0:
+            with _dblock: _db.execute("UPDATE broadcasts SET ok=?,err=? WHERE id=?", (st["ok"], st["err"], bid))
+        time.sleep(0.04)   # ~25 msgs/sec, under Telegram's 30/sec limit
+    if st["status"] == "running": st["status"] = "done"
+    with _dblock: _db.execute("UPDATE broadcasts SET ok=?,err=?,status=? WHERE id=?", (st["ok"], st["err"], st["status"], bid))
+    log("broadcast %s %s ok=%d err=%d" % (bid, st["status"], st["ok"], st["err"]))
     if callback_url:
         try:
             requests.post(callback_url, json={"broadcast_id": bid, "total": len(users),
-                          "total_success": ok, "total_errors": err}, timeout=20)
+                          "total_success": st["ok"], "total_errors": st["err"]}, timeout=20)
         except Exception as e:
             log("broadcast callback failed:", e)
+
+def start_broadcast(text, parse_mode="HTML", active_days=None, reply_markup=None):
+    """used by the panel: send a text message to all (non-blocked) users"""
+    with _dblock:
+        sql = "SELECT user FROM users WHERE COALESCE(blocked,0)=0"
+        args = ()
+        if active_days: sql += " AND last_seen>?"; args = (time.time() - float(active_days) * 86400,)
+        users = [r[0] for r in _db.execute(sql, args).fetchall()]
+    bid = "b" + str(int(time.time() * 1000))[-9:]
+    kw = {"text": text, "parse_mode": parse_mode}
+    if reply_markup: kw["reply_markup"] = reply_markup
+    threading.Thread(target=_do_broadcast, args=(bid, "sendMessage", users, kw, None, text), daemon=True).start()
+    return bid
 
 class _User:
     def __init__(self, ctx): self.ctx = ctx
@@ -667,7 +738,7 @@ def _touch_user(uid):
     with _dblock:
         r = _db.execute("SELECT 1 FROM users WHERE user=?", (str(uid),)).fetchone()
         if r: _db.execute("UPDATE users SET last_seen=? WHERE user=?", (now, str(uid)))
-        else: _db.execute("INSERT INTO users VALUES(?,?,?)", (str(uid), now, now))
+        else: _db.execute("INSERT INTO users(user,first_seen,last_seen) VALUES(?,?,?)", (str(uid), now, now))
 
 def _pop_wait(uid):
     with _dblock:
@@ -679,15 +750,17 @@ def _pop_wait(uid):
 def _run_at_handler(ctx):
     """'@' runs before every command. Returns False if it stopped (raised ReturnCommand) the flow."""
     if "@" not in COMMANDS: return True
-    code = get_code("@")
+    try: code = get_code("@")
+    except SyntaxError as e:
+        record_error("@", ctx.u, e); return True
     CURRENT_USER.u = ctx.u; CURRENT_CB.id = ctx.cb_id
     g = build_globals(ctx, 0)
     try:
         exec(code, g)
     except ReturnCommand:
         return False
-    except Exception:
-        log("ERROR in '@' (user %s):\n%s" % (ctx.u, traceback.format_exc(limit=6)))
+    except Exception as e:
+        record_error("@", ctx.u, e)
     return True
 
 def handle_update(upd):

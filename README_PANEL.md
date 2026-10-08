@@ -1,15 +1,24 @@
-# TBC-Lite panel — saare bots ek server par
+# Panel — saare bots ek server par (TBC jaisa UI)
 
-Panel = apna chhota TBC. Ek hi process mein 100-200+ bots chalte hain, web dashboard se control hota hai.
+Phone-first dark UI (Home, Bots, Errors, Settings, More). Ek hi process mein 100-200+ bots.
 
-## Kya milta hai
-- Login (password), Dashboard (bots, running, users, active 24h, activity chart)
-- Bots list: Start / Stop / Restart, search, filter
-- Bahut saare tokens ek saath add (ek line = ek token), ya kisi bot ke commands copy karke naya bot
-- Command editor (live: save karte hi chalu bot par lagu), naya/delete, syntax check
-- Import / Export commands (TBC wala `=== /name ===` .txt, ya .py/.json), saare bots ke liye ZIP import
-- Per-bot Logs (errors yahin dikhte hain), Data (Bot.getData keys dekho/edit/import)
-- Har bot ka alag database: data/bots/<id>/data.sqlite3, commands: data/bots/<id>/commands.json
+## Kya-kya hai
+- **Home:** active users, commands run, total/working bots, 24h activity chart, most active bots
+- **Bots:** search, filter, pin, export, Start/Stop; "+" se tokens add (ek line = ek token), "⋮" se Start/Stop all
+- **Bot > Intro | Commands | Search | Mini App | Manage | Admin | Settings**
+  - Commands: search, naya, edit, delete, syntax-check (✓), select+delete (🗑), export (</>)
+  - Editor: line numbers, **suggestions** (`Bot.sendmsg` likho -> `Bot.sendMessage`), Enter/Tab se pura snippet, Tab se agle blank par, Ctrl+Space se list
+  - Search: saare commands ke code mein dhundo (Aa / |ab| / .*), History, **Replace All** (jo replace syntax tod de wo skip hota hai)
+  - Admin: Analytics (users 24h/7d/30d, new, blocked, commands lines), Users (balance edit), Broadcasts, Bot Data
+  - Manage/Settings: restart, import/export, token change, error alert Telegram ID, delete
+- **Errors:** command chalane par jo error aaye wo seedha dikhta hai: command, **line number**, error aur code ka tukda.
+  Bell par laal dot, command list mein laal dot, editor mein us line par highlight.
+  Bot Settings mein apna Telegram ID daalo to error aate hi bot tumhe message bhej deta hai.
+
+## Import / Export
+- Import: `.json` (kai formats samajhta hai), `.txt` (`=== /name ===`), `.py`; saath mein bot data bhi (JSON mein `bot_data` ho to)
+- Export: bot JSON (commands + data), commands .txt, saare bots ZIP, full backup (More)
+- ZIP import: file ke naam mein bot ka @username ho
 
 ## Setup (VPS, Ubuntu 24.04)
     sudo mkdir -p /opt/tbcbot && cd /opt/tbcbot          # zip yahin unzip karo
