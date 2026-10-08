@@ -1,0 +1,6 @@
+{% from "_icons.html" import ic with context %}
+{% for e in errors %}<div class="card pad" style="margin-bottom:10px"><div class="row" style="justify-content:space-between;gap:8px"><a href="/bots/{{ e.bot.id if e.bot else bid }}/cmd?name={{e.command|uq}}{% if e.line %}&line={{e.line}}{% endif %}" class="mono" style="color:#a78bfa;font-weight:700;font-size:16px;word-break:break-all">{{e.command}}</a><span class="sub" style="white-space:nowrap">{{e.ts|dt}}</span></div>
+{% if e.bot %}<div class="sub">@{{e.bot.username}}</div>{% endif %}
+<div style="color:#fca5a5;margin-top:6px;font-weight:600;word-break:break-word">{{e.etype}}: {{e.msg}}</div><div class="sub">{% if e.line %}line {{e.line}} · {% endif %}user {{e.user}}</div>
+{% if e.ctx %}<div class="errctx">{% for ln in e.ctx %}<div class="{{'hit' if ln[0]==e.line}}"><i>{{ln[0]}}</i>{{ln[1]}}</div>{% endfor %}</div>{% endif %}</div>
+{% else %}<div class="card empty"><div class="ci" style="color:var(--gr)">{{ic('check',28)}}</div>No errors. Everything is running fine.</div>{% endfor %}

@@ -1,0 +1,2 @@
+{% extends 'base.html' %}{% from '_icons.html' import ic with context %}{% block body %}<h2 class="page">Errors <span class="pill mu">{{errors|length}}</span></h2>
+<p class="sub" style="margin-top:-8px">Latest command errors across all bots. Tap a command to open it at the failing line.</p>{% set bid = 0 %}{% include '_errlist.html' %}{% endblock %}

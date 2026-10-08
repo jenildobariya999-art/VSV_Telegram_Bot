@@ -1,0 +1,7 @@
+{% extends 'admin_base.html' %}{% block sub %}
+<div class="sub" style="margin:0 4px 10px">{{counts[0]}} bot keys · {{counts[1]}} user keys · {{counts[2]}} users</div>
+<div class="toolbar"><form method="get" class="searchbox" style="margin:0">{{ic('search',20)}}<input name="q" value="{{qs}}" placeholder="Search keys"></form><a class="iconbtn ac" href="/bots/{{bid}}/data/edit" title="New key">{{ic('plus',24)}}</a></div>
+<div class="card">{% for r in rows %}<a class="row" href="/bots/{{bid}}/data/edit?key={{r[0]|uq}}" style="padding:13px 16px;border-top:1px solid var(--bd)"><span class="mono grow" style="font-weight:600;color:#a78bfa;overflow:hidden;text-overflow:ellipsis">{{r[0]}}</span><span class="sub mono" style="max-width:45%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{r[1]}}</span></a>{% else %}<div class="empty">No keys.</div>{% endfor %}</div>
+<div class="row" style="margin-top:12px"><a class="btn g grow" href="/bots/{{bid}}/data/export.json">{{ic('download',18)}} Export JSON</a></div>
+<div class="sec">Import data (JSON)</div><form method="post" action="/bots/{{bid}}/data/import" enctype="multipart/form-data" class="card pad"><input type="hidden" name="csrf" value="{{csrf}}">
+<p class="sub" style="margin-top:0">A JSON object <code>{"key": value}</code>; each key goes into Bot data.</p><div class="field"><input type="file" name="file"></div><div class="field"><textarea name="text" rows="3" class="mono"></textarea></div><button class="btn full">{{ic('upload',18)}} Import</button></form>{% endblock %}

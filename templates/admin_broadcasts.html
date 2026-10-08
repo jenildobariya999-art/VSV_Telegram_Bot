@@ -1,0 +1,10 @@
+{% extends 'admin_base.html' %}{% block sub %}
+{% if not running %}<div class="err">Start the bot to send a broadcast.</div>{% endif %}
+<form method="post" action="/bots/{{bid}}/broadcast" class="card pad"><input type="hidden" name="csrf" value="{{csrf}}">
+<div class="field" style="margin-top:0"><label>Message ({{s.total - s.blocked}} reachable users)</label><textarea name="text" rows="5" placeholder="<b>Hello!</b> Your message here…"></textarea></div>
+<div class="row"><select name="parse_mode"><option value="HTML">HTML</option><option value="">Plain text</option><option value="Markdown">Markdown</option></select>
+<select name="days"><option value="">All users</option><option value="1">Active last 24h</option><option value="7">Active last 7d</option><option value="30">Active last 30d</option></select></div>
+<div class="row" style="margin-top:10px"><input name="btn_text" placeholder="Button text (optional)"><input name="btn_url" placeholder="https://… (button link)"></div>
+<button class="btn full" style="margin-top:12px" {{ '' if running else 'disabled' }}>{{ic('send',18)}} Send broadcast</button></form>
+<div class="sec">Recent broadcasts</div>{% for r in rows %}<div class="card pad" style="margin-bottom:10px" data-bc="{{r[0]}}" data-status="{{r[6]}}"><div class="row" style="justify-content:space-between"><span class="pill mu">{{r[6]}}</span><span class="sub">{{r[1]|dt}}</span></div>
+<div style="margin:8px 0;white-space:pre-wrap;word-break:break-word">{{r[2][:200]}}</div><div class="sub"><span class="bc-ok">{{r[4]}}</span> sent · <span class="bc-err">{{r[5]}}</span> failed · {{r[3]}} total</div></div>{% else %}<div class="card empty">No broadcasts yet.</div>{% endfor %}{% endblock %}

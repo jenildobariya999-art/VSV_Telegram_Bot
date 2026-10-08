@@ -1,0 +1,7 @@
+{% extends 'admin_base.html' %}{% block sub %}
+<div class="stats"><div><div class="k">Total Users</div><div class="v">{{s.total}}</div></div><div><div class="k">Active (24h)</div><div class="v g">{{s.a24}}</div></div>
+<div><div class="k">Active (7d)</div><div class="v">{{s.a7}}</div></div><div><div class="k">Active (30d)</div><div class="v">{{s.a30}}</div></div>
+<div><div class="k">New (24h)</div><div class="v g">{{s.n24}}</div><div class="sub">joined today</div></div><div><div class="k">New (7d)</div><div class="v o">{{s.n7}}</div></div>
+<div><div class="k">New (30d)</div><div class="v o">{{s.n30}}</div></div><div><div class="k">Blocked</div><div class="v r">{{s.blocked}}</div></div></div>
+<div class="card pad mt"><div class="sec" style="margin:0 0 6px;color:#a1a1aa">Commands ({{ncmds}})</div>
+{% for r in rows %}<div class="bar"><span class="n">{{r[0]}}</span><span class="l">{{r[1]}} lines</span><span class="t"><i style="width:{{ (r[1]/mx*100)|round(1) }}%"></i></span></div>{% endfor %}</div>{% endblock %}

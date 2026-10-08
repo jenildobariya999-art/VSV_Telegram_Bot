@@ -1,0 +1,4 @@
+{% extends 'admin_base.html' %}{% block sub %}<a class="sub" href="/bots/{{bid}}/admin/data">← Bot Data</a>
+{% if msg %}<div class="err">{{msg}}</div>{% endif %}<form method="post" class="card pad mt"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="key" value="{{key}}">
+<div class="field" style="margin-top:0"><input name="newkey" value="{{newkey}}" placeholder="key name" class="mono"></div><div class="field"><textarea name="value" rows="14" class="mono" spellcheck="false">{{value}}</textarea></div>
+<div class="row"><button class="btn grow">Save</button>{% if key %}<button class="btn dr" name="do" value="delete" onclick="return confirm('Delete key?')">{{ic('trash',18)}}</button>{% endif %}</div></form>{% endblock %}

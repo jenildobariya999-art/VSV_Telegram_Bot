@@ -1,0 +1,17 @@
+{% extends 'bot_base.html' %}{% block inner %}
+<div class="card"><div class="hero"><div class="av">{{plane(34)}}</div><div class="grow"><h3>{{b.name}}</h3><a class="un" href="{{url}}" target="_blank">@{{b.username}}</a>
+<div class="id">{{b.id}} <span>·</span> {% if state=='running' %}<b>● Active</b>{% else %}<b class="off">● {{state|capitalize}}</b>{% endif %}</div></div>
+<form method="post" action="/bots/{{bid}}/action"><input type="hidden" name="csrf" value="{{csrf}}">
+{% if state in ['running','starting'] %}<button class="bigbtn stop" name="action" value="stop"><span class="c"><svg width="12" height="12" viewBox="0 0 12 12"><rect width="12" height="12" rx="2" fill="#ff4538"/></svg></span>Stop</button>
+{% else %}<button class="bigbtn start" name="action" value="start"><span class="c"><svg width="12" height="12" viewBox="0 0 12 12"><path d="M2 1l9 5-9 5z" fill="#16a34a"/></svg></span>Start</button>{% endif %}</form></div></div>
+{% if err %}<div class="err">{{err}}</div>{% endif %}
+<div class="card grid3 mt"><div><div class="k">Users</div><div class="v" style="font-size:32px">{{users}}</div></div><div><div class="k">Commands</div><div class="v" style="font-size:32px">{{ncmds}}</div></div>
+<div><div class="k">Uptime</div><div class="v" style="font-size:28px" id="uptime" data-start="{{started}}">{{ '--:--:--' if not started else '' }}</div></div></div>
+<div class="card mt"><div class="kv">Last active <span>{{last|date}}</span></div><div class="kv">Version <span>v1.0.0</span></div></div>
+<div class="card list mt"><a class="it" href="{{url}}" target="_blank">Open in Telegram<span class="r">{{ic('right',22)}}</span></a>
+<a class="it" href="/bots/{{bid}}/commands">Commands<span class="r">{{ncmds}} {{ic('right',22)}}</span></a>
+<a class="it" href="/bots/{{bid}}/errors">Errors<span class="r" style="{{ 'color:var(--rd)' if nerr }}">{{nerr}} {{ic('right',22)}}</span></a>
+<a class="it" href="/bots/{{bid}}/admin/analytics">Admin panel<span class="r">{{ic('right',22)}}</span></a>
+<a class="it" href="/bots/{{bid}}/miniapp">Mini app<span class="r">{{ic('right',22)}}</span></a>
+<a class="it" href="/bots/{{bid}}/manage">Manage<span class="r">{{ic('right',22)}}</span></a>
+<button class="it" type="button" data-copy="{{b.tg_id or b.id}}">Copy bot ID<span class="r">{{b.tg_id or b.id}}</span></button></div>{% endblock %}

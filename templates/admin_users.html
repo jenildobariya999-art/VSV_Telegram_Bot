@@ -1,0 +1,6 @@
+{% extends 'admin_base.html' %}{% block sub %}
+<form method="get" style="margin-bottom:12px"><div class="searchbox">{{ic('search',20)}}<input name="q" value="{{qs}}" placeholder="Search user ID"></div></form>
+<div class="sub" style="margin:0 4px 8px">{{tot}} users · page {{page}}/{{pages}}</div>
+<div class="card">{% for r in rows %}<a class="row" href="/bots/{{bid}}/user/{{r[0]}}" style="padding:14px 16px;border-top:1px solid var(--bd)"><div class="grow"><div class="mono" style="font-size:16px;font-weight:600">{{r[0]}}</div><div class="sub">joined {{r[1]|date}} · last seen {{r[2]|dt}}</div></div>
+{% if r[3] %}<span class="pill" style="background:#3b1519;color:#fca5a5">blocked</span>{% endif %}<span style="color:var(--mu)">{{ic('right',20)}}</span></a>{% else %}<div class="empty">No users yet.</div>{% endfor %}</div>
+<div class="row" style="justify-content:center;margin-top:14px">{% if page>1 %}<a class="btn g sm" href="?q={{qs}}&page={{page-1}}">← Prev</a>{% endif %}{% if page<pages %}<a class="btn g sm" href="?q={{qs}}&page={{page+1}}">Next →</a>{% endif %}</div>{% endblock %}

@@ -1,0 +1,3 @@
+{% extends 'base.html' %}{% from '_icons.html' import ic, plane with context %}{% block body %}
+<div class="tabrow"><a class="backbtn" href="/bots">{{ic('left',22)}}</a><div class="tabs" id="tabs">{% for t in tabs %}<a href="/bots/{{bid}}/{{t[0]}}" class="{{'on' if tab==t[0]}}">{{ic(t[2],20)}}{{t[1]}}</a>{% endfor %}</div></div>
+{% block inner %}{% endblock %}{% endblock %}

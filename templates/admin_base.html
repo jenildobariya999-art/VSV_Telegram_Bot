@@ -1,0 +1,1 @@
+{% extends 'bot_base.html' %}{% block inner %}<div class="subtabs">{% for s in subs %}<a href="/bots/{{bid}}/admin/{{s[0]}}" class="{{'on' if sub==s[0]}}">{{s[1]}}</a>{% endfor %}</div>{% block sub %}{% endblock %}{% endblock %}

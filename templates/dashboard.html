@@ -1,0 +1,14 @@
+{% extends 'base.html' %}{% from '_icons.html' import ic, plane with context %}{% block body %}
+<div class="dash-top"><h2 class="page" style="margin:6px 0">Dashboard</h2><a class="iconbtn" href="/" title="Refresh">{{ic('refresh',22)}}</a></div>
+<div class="sec">Last 24 hours</div>
+<div class="card grid2"><div><div class="k">Active users</div><div class="v g">{{ '{:,}'.format(d.active) }}</div></div><div><div class="k">Commands run</div><div class="v">{{ '{:,}'.format(d.cmds) }}</div></div>
+<div><div class="k">Total bots</div><div class="v">{{d.total}}</div></div><div><div class="k">Working</div><div class="v">{{d.working}}</div></div></div>
+<div class="sec">Activity</div>
+<div class="card"><div id="chart" data-series='{{ d.series|tojson }}' data-hours='{{ d.hours|tojson }}' style="padding:14px 8px 4px"></div>
+<div class="grid2" style="border-top:1px solid var(--bd)"><div><div class="k">Users</div><div class="v">{{ '{:,}'.format(d.users) }}</div></div><div><div class="k">Peak hour</div><div class="v g">{{d.peak}}</div></div>
+<div><div class="k">Avg / hour</div><div class="v">{{d.avg}}</div></div><div><div class="k">Active hrs</div><div class="v">{{d.active_hrs}}/24</div></div></div></div>
+<div class="sec">Most active bots</div>
+{% for b in d.top %}<a class="bot" href="/bots/{{b.id}}/intro"><div class="av">{{plane(26)}}</div><div class="grow"><div class="nm">@{{b.username}}</div><div class="st {{b.state}}">{{ 'Working' if b.state=='running' else b.state|capitalize }}</div></div>
+<div class="side"><span style="font-size:19px;color:var(--tx);font-weight:500">{{ '{:,}'.format(b.users) }} users</span></div><span style="color:var(--mu)">{{ic('right',20)}}</span></a>
+{% else %}<div class="card empty">No bots yet. <a href="/bots/new" style="color:var(--ac)">Add your first bot</a></div>{% endfor %}
+{% endblock %}

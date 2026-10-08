@@ -1,1 +1,11 @@
-
+{% extends 'bot_base.html' %}{% block inner %}<div class="row" style="margin-bottom:10px"><a class="sub" href="/bots/{{bid}}/commands">← Commands</a></div>
+{% if msg %}<div class="err">{{msg}}</div>{% endif %}
+{% if lasterr %}<div class="card pad" style="border-color:#5b2229;margin-bottom:12px"><div class="row" style="justify-content:space-between"><b style="color:#fca5a5">Last error in this command</b><span class="sub">{{lasterr.ts|dt}}</span></div>
+<div style="color:#fca5a5;margin-top:4px;word-break:break-word">{{lasterr.etype}}: {{lasterr.msg}}{% if lasterr.line %} — line {{lasterr.line}}{% endif %}</div>
+{% if lasterr.ctx %}<div class="errctx">{% for ln in lasterr.ctx %}<div class="{{'hit' if ln[0]==lasterr.line}}"><i>{{ln[0]}}</i>{{ln[1]}}</div>{% endfor %}</div>{% endif %}</div>{% endif %}
+<form method="post" id="cmdform"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="name" value="{{name}}">
+<div class="field" style="margin-top:0"><input name="newname" value="{{newname}}" placeholder="/command (or button text)" class="mono" style="font-weight:700;color:#a78bfa"></div>
+<textarea name="code" id="code" rows="24" class="mono" spellcheck="false" data-errline="{{ synline or (lasterr.line if lasterr else '') or request.args.get('line','') }}">{{code}}</textarea>
+<div class="sub" style="margin:8px 2px">Type <b>Bot.</b> / <b>bot.</b> / <b>User.</b> / <b>libs.</b> to get suggestions · <b>Enter</b>/<b>Tab</b> inserts the full snippet · <b>Tab</b> jumps to the next blank · <b>Ctrl+Space</b> opens the list</div>
+<div class="row"><button class="btn grow" style="padding:14px">Save{% if not isnew %} (live){% endif %}</button>{% if not isnew %}<button class="btn dr" name="do" value="delete" onclick="return confirm('Delete this command?')">{{ic('trash',18)}}</button>{% endif %}</div></form>{% endblock %}
+{% block scripts %}<script src="/static/tbc_api.js"></script><script src="/static/editor.js"></script>{% endblock %}

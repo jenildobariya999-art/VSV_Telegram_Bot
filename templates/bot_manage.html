@@ -1,0 +1,17 @@
+{% extends 'bot_base.html' %}{% block inner %}
+<div class="card list"><form method="post" action="/bots/{{bid}}/action"><input type="hidden" name="csrf" value="{{csrf}}">
+<button class="it" name="action" value="restart">{{ic('refresh',22)}} Restart bot</button>
+{% if state in ['running','starting'] %}<button class="it" name="action" value="stop">{{ic('stop',22)}} Stop bot</button>{% else %}<button class="it" name="action" value="start">{{ic('play',22)}} Start bot</button>{% endif %}</form>
+<a class="it" href="/bots/{{bid}}/export.json?data=1">{{ic('export',22)}} Export bot (JSON with data)</a><a class="it" href="/bots/{{bid}}/export.json">{{ic('download',22)}} Export commands only (JSON)</a>
+<a class="it" href="/bots/{{bid}}/export.txt">{{ic('code',22)}} Export commands (.txt)</a></div>
+<div class="sec">Import (JSON / .txt exported from TBC)</div>
+<form method="post" action="/bots/{{bid}}/import" enctype="multipart/form-data" class="card pad"><input type="hidden" name="csrf" value="{{csrf}}">
+<div class="field"><input type="file" name="file"></div><div class="field"><textarea name="text" rows="3" class="mono" placeholder="…or paste the file content here"></textarea></div>
+<div class="row"><select name="mode" style="width:auto"><option value="replace">Replace all commands</option><option value="merge">Merge (same names overwritten)</option></select>
+<label class="row" style="white-space:nowrap"><input type="checkbox" name="with_data" value="1" checked> include data</label></div><button class="btn full" style="margin-top:12px">{{ic('upload',18)}} Import</button></form>
+<div class="sec">Copy commands from another bot</div>
+<form method="post" action="/bots/add" class="card pad" onsubmit="return confirm('This only works when adding new bots. Use Import instead.');" style="display:none"></form>
+<div class="card pad sub">To clone this bot's commands into new bots: Bots → <b>+</b> → choose “Start with commands from #{{bid}}”.</div>
+<div class="sec">Danger zone</div>
+<form method="post" action="/bots/{{bid}}/action" class="card pad row" onsubmit="return confirm('Delete this bot from the panel?')"><input type="hidden" name="csrf" value="{{csrf}}">
+<label class="row grow sub"><input type="checkbox" name="purge" value="1"> also delete its commands &amp; data</label><button class="btn dr" name="action" value="delete">{{ic('trash',18)}} Delete bot</button></form>{% endblock %}

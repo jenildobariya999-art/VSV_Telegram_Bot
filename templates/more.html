@@ -1,0 +1,5 @@
+{% extends 'base.html' %}{% from '_icons.html' import ic with context %}{% block body %}<h2 class="page">More</h2>
+<div class="card list"><a class="it" href="/bots/new">{{ic('plus',22)}} Add / import bots<span class="r">{{ic('right',22)}}</span></a><a class="it" href="/bots/export-all?data=1">{{ic('export',22)}} Export all bots (ZIP)<span class="r">{{ic('right',22)}}</span></a>
+<a class="it" href="/backup.zip">{{ic('database',22)}} Full backup (data folder)<span class="r">{{ic('right',22)}}</span></a><a class="it" href="/errors">{{ic('bug',22)}} All errors<span class="r">{{ic('right',22)}}</span></a>
+<a class="it" href="/settings">{{ic('gear',22)}} Settings<span class="r">{{ic('right',22)}}</span></a>
+<form method="post" action="/logout"><input type="hidden" name="csrf" value="{{csrf}}"><button class="it red">{{ic('logout',22)}} Logout</button></form></div>{% endblock %}

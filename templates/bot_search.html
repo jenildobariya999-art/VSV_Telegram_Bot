@@ -1,0 +1,8 @@
+{% extends 'bot_base.html' %}{% block inner %}
+<div class="sbox"><div class="searchbox">{{ic('search',20)}}<input id="q" class="mono" placeholder="Search across all command code…" autocomplete="off" style="border-color:var(--ac)"></div>
+<div class="toggles"><button type="button" class="tg" id="t-case" title="Match case">Aa</button><button type="button" class="tg" id="t-word" title="Whole word">|ab|</button><button type="button" class="tg" id="t-regex" title="Regex">.*</button>
+<button type="button" class="tg txt" id="t-hist">{{ic('clock',20)}}History</button></div><div id="hist" style="display:none;margin-bottom:10px"></div>
+<div class="row"><div class="searchbox" style="flex:1"><input id="repl" class="mono" placeholder="Replace with… (leave empty to delete)" style="padding-left:14px"></div><button class="btn gr" id="btn-replace" style="padding:15px 18px">Replace All</button></div>
+<div class="sub" id="info" style="margin-top:12px;font-size:15px">Searches {{ncmds}} commands with code.</div></div>
+<div id="results"><div class="empty"><div class="ci">{{ic('search',28)}}</div><div style="font-size:19px;font-weight:700;color:var(--tx)">Search across every command's code</div><div style="margin-top:6px">Start typing above to find any string, variable or function call.</div></div></div>{% endblock %}
+{% block scripts %}<script>window.BID={{bid}};</script><script src="/static/search.js"></script>{% endblock %}

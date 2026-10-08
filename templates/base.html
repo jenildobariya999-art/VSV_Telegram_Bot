@@ -1,0 +1,15 @@
+{% from '_icons.html' import ic, plane with context %}<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="csrf" content="{{csrf}}"><meta name="theme-color" content="#09090b">
+<title>{% block title %}{{APP_TITLE}}{% endblock %}</title><link rel="stylesheet" href="/static/app.css">{% block head %}{% endblock %}</head>
+<body><div class="app">
+{% if session.ok %}<header class="top"><div class="logo"><svg width="26" height="26" viewBox="0 0 24 24"><defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#38bdf8"/><stop offset="1" stop-color="#2563eb"/></linearGradient></defs><path d="M3 12c3-5 8-8 15-8-2 3-4 4-7 5 3 0 6 1 9 4-5-1-8 0-11 4 0-3-2-4-6-5z" fill="url(#lg)"/></svg></div>
+<h1>{{APP_TITLE}}</h1><a class="bell" href="/errors" title="Errors">{{ic('bell',26)}}{% if recent_errors() %}<i></i>{% endif %}</a></header>{% endif %}
+<main>{% for m in get_flashed_messages() %}<div class="flash">{{m}}</div>{% endfor %}{% block body %}{% endblock %}</main>
+{% if session.ok %}{% block bottom %}{% endblock %}
+<nav class="bottom"><div class="in">
+<a href="/" class="{{'on' if nav=='home'}}">{{ic('home',26)}}Home</a>
+<a href="/bots" class="{{'on' if nav=='bots'}}">{{ic('cpu',26)}}Bots</a>
+<a href="/errors" class="{{'on' if nav=='errors'}}">{{ic('bug',26)}}Errors</a>
+<a href="/settings" class="{{'on' if nav=='settings'}}">{{ic('gear',26)}}Settings</a>
+<a href="/more" class="{{'on' if nav=='more'}}">{{ic('menu',26)}}More</a></div></nav>{% endif %}
+</div><script src="/static/app.js"></script>{% block scripts %}{% endblock %}</body></html>

@@ -1,0 +1,9 @@
+{% extends 'base.html' %}{% from '_icons.html' import ic with context %}{% block body %}<h2 class="page">Settings</h2>
+{% if pwgen %}<div class="err" style="color:#fde68a;background:#2a2410;border-color:#5b4a1c">You are using an auto-generated password (see the server log). Please set your own below.</div>{% endif %}
+<form method="post" class="card pad"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="do" value="general">
+<div class="field" style="margin-top:0"><label>Panel title</label><input name="title" value="{{title}}" placeholder="{{APP_TITLE}}"></div>
+<div class="field"><label>Default Telegram ID for error alerts (all bots)</label><input name="error_chat" value="{{error_chat}}" inputmode="numeric" placeholder="e.g. 123456789"><div class="sub" style="margin-top:6px">Bots with their own ID in Bot → Settings use that one. Applies after a bot restart.</div></div><button class="btn full">Save</button></form>
+<div class="sec">Change password</div><form method="post" class="card pad"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="do" value="password">
+<div class="field" style="margin-top:0"><input type="password" name="old" placeholder="Current password" autocomplete="current-password"></div><div class="field"><input type="password" name="new" placeholder="New password (min 8)" autocomplete="new-password"></div><button class="btn g full">Change password</button></form>
+<div class="sec">Server</div><div class="card"><div class="kv">Panel port <span>{{port}}</span></div><div class="kv">Public URL <span>{{ public or 'not set' }}</span></div></div>
+{% if not public %}<p class="sub">Set <code>PUBLIC_URL</code> (https address of this panel) so payment/verification webhooks and mini apps get a public link.</p>{% endif %}{% endblock %}

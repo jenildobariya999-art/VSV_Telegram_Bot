@@ -1,0 +1,15 @@
+{% extends 'base.html' %}{% from '_icons.html' import ic, plane with context %}{% block body %}
+<div class="row" style="margin:6px 0 4px"><h2 class="page" style="margin:0">My Bots</h2><span class="pill">{{allusers|compact}} users</span><a class="iconbtn ac" href="/bots/new" style="width:52px;height:52px;margin-left:4px">{{ic('plus',26)}}</a>
+<div class="menu" style="margin-left:auto"><button class="iconbtn" style="background:none;border:0" type="button" onclick="this.parentNode.classList.toggle('open')">{{ic('dots',24)}}</button>
+<div class="pop"><form method="post" action="/bots/bulk"><input type="hidden" name="csrf" value="{{csrf}}"><button name="action" value="start_all">▶ Start all bots</button><button name="action" value="stop_all">■ Stop all bots</button></form>
+<a href="/bots/new">＋ Add / import bots</a><a href="/bots/export-all?data=1">⬇ Export all (ZIP)</a></div></div></div>
+<div class="pills"><a href="/bots?f=all" class="{{'on' if f=='all'}}">{{ic('folder',18)}}All Bots ({{total}})</a><a href="/bots?f=pinned" class="{{'on' if f=='pinned'}}">{{ic('pin',18)}}Pinned ({{pinned}})</a>
+<a href="/bots?f=running" class="{{'on' if f=='running'}}">Working</a><a href="/bots?f=stopped" class="{{'on' if f=='stopped'}}">Stopped</a><a href="/bots?f=error" class="{{'on' if f=='error'}}">Errors</a></div>
+<form method="get" style="margin-bottom:14px"><input type="hidden" name="f" value="{{f}}"><div class="searchbox">{{ic('search',20)}}<input name="q" value="{{qs}}" placeholder="Search" style="border-radius:16px;padding:15px 15px 15px 44px"></div></form>
+{% for b in bots %}<div class="bot"><a class="row grow" href="/bots/{{b.id}}/intro" style="gap:12px;min-width:0"><div class="av">{{plane(30)}}</div>
+<div class="grow"><div class="nm">{{b.name}}</div><div class="un">@{{b.username}}</div><div class="st {{b.state}}">{{ 'Working' if b.state=='running' else b.state|capitalize }}</div></div>
+<div class="side"><b>{{ '{:,}'.format(b.users) }} users</b><span>{{b.tgid}}</span></div></a>
+<div class="acts"><a href="/bots/{{b.id}}/export.json?data=1" title="Export" style="padding:8px;color:#a78bfa">{{ic('export',24)}}</a>
+<form method="post" action="/bots/{{b.id}}/action"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="next" value="/bots?f={{f}}"><button name="action" value="pin" title="Pin">
+<svg width="24" height="24" viewBox="0 0 24 24" fill="{{ 'currentColor' if b.pinned else 'none' }}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg></button></form></div></div>
+{% else %}<div class="card empty">No bots found.</div>{% endfor %}{% endblock %}

@@ -1,0 +1,11 @@
+{% extends 'base.html' %}{% from '_icons.html' import ic with context %}{% block body %}
+<div class="row" style="margin-bottom:14px"><a class="backbtn" href="/bots">{{ic('left',22)}}</a><h2 class="page" style="margin:0">Add bots</h2></div>
+<form method="post" action="/bots/add" enctype="multipart/form-data" class="card pad"><input type="hidden" name="csrf" value="{{csrf}}">
+<div class="field"><label>Bot tokens from @BotFather — one per line</label><textarea name="tokens" rows="5" class="mono" placeholder="123456:ABC-DEF…&#10;987654:XYZ…"></textarea></div>
+<div class="field"><label>Start with commands from</label><select name="copy_from"><option value="">Nothing (empty bot)</option>{% for b in all_bots %}<option value="{{b.id}}">#{{b.id}} {{b.name}} ({{b.cmds}} commands)</option>{% endfor %}</select></div>
+<div class="field"><label>…or upload a file exported from TBC (.json / .txt) — overrides the choice above</label><input type="file" name="file"></div>
+<label class="row" style="margin:14px 0"><input type="checkbox" name="start" value="1"> Start the bots right after adding</label><button class="btn full">Add bots</button></form>
+<div class="sec">Bulk import commands (ZIP)</div>
+<form method="post" action="/bots/import-zip" enctype="multipart/form-data" class="card pad"><input type="hidden" name="csrf" value="{{csrf}}">
+<p class="sub" style="margin-top:0">One file per bot (.json / .txt). The file name must contain the bot's <b>@username</b> (e.g. <code>My_bot.json</code>). Bots must already be added above.</p>
+<div class="field"><input type="file" name="file" accept=".zip"></div><div class="row"><select name="mode" style="width:auto"><option value="replace">Replace commands</option><option value="merge">Merge</option></select><button class="btn grow">Import ZIP</button></div></form>{% endblock %}

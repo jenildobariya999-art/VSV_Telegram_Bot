@@ -1,0 +1,5 @@
+{% extends 'bot_base.html' %}{% block inner %}
+<div class="card pad"><div class="sub" style="margin:0 0 10px">Write the HTML of your Telegram Mini App. After saving, use the public URL as a <code>web_app</code> button URL in your commands.</div>
+{% if url %}<div class="row" style="margin-bottom:12px"><input value="{{url}}" readonly class="mono" id="murl"><button class="iconbtn" type="button" data-copy="{{url}}">{{ic('copy',20)}}</button><a class="iconbtn" href="{{url}}" target="_blank">{{ic('ext',20)}}</a></div>{% endif %}
+<form method="post"><input type="hidden" name="csrf" value="{{csrf}}"><textarea name="html" rows="18" class="mono" spellcheck="false">{{html}}</textarea><button class="btn full" style="margin-top:12px">Save mini app</button></form>
+{% if not url %}<div class="sub" style="margin-top:10px">The public URL appears after the first save. Telegram needs HTTPS — set <code>PUBLIC_URL</code> to your https address.</div>{% endif %}</div>{% endblock %}

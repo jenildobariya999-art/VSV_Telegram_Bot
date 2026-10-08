@@ -1,0 +1,16 @@
+{% extends 'bot_base.html' %}{% block inner %}
+<div class="toolbar"><div class="searchbox">{{ic('search',20)}}<input id="cfilter" placeholder="Search" autocomplete="off"></div>
+<a class="iconbtn" href="/bots/{{bid}}/export.txt" title="Export commands (.txt)">{{ic('code',22)}}</a>
+<button class="iconbtn" type="button" id="btn-check" title="Check syntax of all commands">{{ic('check',22)}}</button>
+<button class="iconbtn" type="button" id="btn-sel" title="Select & delete">{{ic('trash',22)}}</button>
+<a class="iconbtn ac" href="/bots/{{bid}}/cmd" title="New command">{{ic('plus',24)}}</a></div>
+<div id="checkres"></div>
+<form method="post" action="/bots/{{bid}}/cmds/delete" id="delform"><input type="hidden" name="csrf" value="{{csrf}}">
+<div id="cmdlist">{% for n in names %}<div class="cmdrow" data-name="{{n|lower}}"><input type="checkbox" name="names" value="{{n}}"><span class="ic">{{ic('code',20)}}</span>
+<a class="nm" href="/bots/{{bid}}/cmd?name={{n|uq}}">{{n}}</a>{% if n in errcmds %}<span class="dot" title="This command had an error recently"></span>{% endif %}
+<a class="e" href="/bots/{{bid}}/cmd?name={{n|uq}}">{{ic('edit',22)}}</a><button type="button" class="d" data-del="{{n}}">{{ic('trash',22)}}</button></div>
+{% else %}<div class="card empty">No commands yet. Tap + or import a file in Manage.</div>{% endfor %}</div></form>
+<form method="post" action="/bots/{{bid}}/cmds/delete" id="onedel" style="display:none"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="names" id="onedelname"></form>
+{% endblock %}
+{% block bottom %}<div class="chipbar"><div class="in"><a class="chip" href="/bots/{{bid}}/commands">{{ic('folder',22)}}All <b>{{ncmds}}</b></a><span class="sp"></span>
+<button class="btn dr" id="btn-delsel" style="display:none" form="delform">{{ic('trash',18)}} Delete selected</button><a class="iconbtn" href="/bots/{{bid}}/manage" style="background:#1d1b3a;color:#a78bfa">{{ic('gear',22)}}</a></div></div>{% endblock %}

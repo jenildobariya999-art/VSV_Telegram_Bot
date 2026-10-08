@@ -1,0 +1,9 @@
+{% extends 'bot_base.html' %}{% block inner %}
+<form method="post" class="card pad"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="do" value="save">
+<div class="field"><label>Bot name (shown in the panel)</label><input name="name" value="{{b.name}}"></div>
+<div class="field"><label>Send command errors to this Telegram ID (optional)</label><input name="error_chat" value="{{b.error_chat or ''}}" placeholder="{{ global_chat or 'your numeric Telegram ID' }}" inputmode="numeric">
+<div class="sub" style="margin-top:6px">When a command crashes, the bot messages you the command name, line number and the error. Leave empty to only see errors in the Errors page.</div></div>
+<div class="field"><label>Note</label><textarea name="note" rows="2">{{b.note or ''}}</textarea></div><button class="btn full">Save</button></form>
+<div class="sec">Bot token</div>
+<form method="post" class="card pad"><input type="hidden" name="csrf" value="{{csrf}}"><input type="hidden" name="do" value="token"><div class="field"><label>New token (current: {{b.token[:10]}}…)</label><input name="token" class="mono" placeholder="123456:ABC…"></div>
+<button class="btn g full">Change token</button></form>{% endblock %}
